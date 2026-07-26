@@ -10,6 +10,31 @@ do not.
 csproj reads `$(Version)` out of it, and `tools/check-metadata.py` asserts that
 `src/Plugin.cs` and this file match.
 
+## 1.3.0
+
+### Added
+- **In-game settings page**, in the Remix config menu (main menu -> Remix ->
+  True Resolution -> cog). Deliberately plain: one tab, one control per setting,
+  and a live status line reading `logical -> render -> screen` so you can see
+  what you actually got rather than what you asked for. Exposes Supersample,
+  Downsample filter, Aspect fit and Native backbuffer; the rarely-needed
+  `TargetWidth`/`TargetHeight` and `LegacyScreenOffset` stay in the config file.
+- Settings apply immediately. A Supersample or Downsample change rebuilds through
+  the game's own `Futile.UpdateScreenWidth`, which is the only path that also
+  rebinds `camera.targetTexture` and the presenting `RawImage` — going through
+  `ReinitRenderTexture` directly would leave both pointing at a released texture
+  when the scale shrinks.
+- `Presentation.Restore()`, so switching *away* from Letterbox at runtime hands
+  the `RawImage` back to the game (full-stretch anchors, backdrop destroyed,
+  cursor patch removed) instead of leaving it fitted to the previous aspect.
+
+### Changed
+- The BepInEx config file remains the single source of truth. The page seeds its
+  controls from it whenever the menu opens and writes back on Apply, so hand-editing
+  the `.cfg` and using the page cannot disagree. Remix's own persisted copy is ignored.
+- Registration happens in `On.RainWorld.OnModsInit` and is non-fatal: if
+  `SetRegisteredOI` fails the mod logs it and keeps working from the config file.
+
 ## 1.2.0
 
 ### Added

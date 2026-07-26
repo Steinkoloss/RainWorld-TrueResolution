@@ -43,7 +43,7 @@ namespace TrueResolution
     {
         public const string PluginGuid = "steinkoloss.trueresolution";
         public const string PluginName = "True Resolution";
-        public const string PluginVersion = "1.2.0";
+        public const string PluginVersion = "1.3.0";
 
         internal static ManualLogSource Log;
 
@@ -94,6 +94,64 @@ namespace TrueResolution
         private static Options lastOptions;
         private bool loggedUpdateFailure;
         private bool loggedPresentationFailure;
+
+        /// <summary>Set once so the Remix options page can reach the live values and the apply path.</summary>
+        private static Plugin self;
+        private static TrueResolutionOptions optionsUI;
+        private static bool optionsRegistered;
+
+        internal static int CurrentSupersample => DesiredScale;
+        internal static bool CurrentNativeBackbuffer => self != null && self.cfgNativeBackbuffer.Value;
+        internal static DownsampleMode CurrentDownsample => Downsampling;
+        internal static AspectMode CurrentAspect => Presentation.Mode;
+
+        /// <summary>
+        /// Applies a change made in the Remix options page. The BepInEx config file remains the storage,
+        /// so everything is written back to it and persisted by BepInEx as usual.
+        /// </summary>
+        internal static void ApplyFromOptions(int supersample, bool nativeBackbuffer,
+                                              DownsampleMode ds, AspectMode am)
+        {
+            if (self == null) return;
+
+            int newScale = Mathf.Clamp(supersample, 1, 8);
+            bool rebuildNeeded = newScale != DesiredScale || ds != Downsampling;
+            bool aspectChanged = am != Presentation.Mode;
+
+            self.cfgSupersample.Value = newScale;
+            self.cfgNativeBackbuffer.Value = nativeBackbuffer;
+            self.cfgDownsample.Value = ds;
+            self.cfgAspectMode.Value = am;
+
+            DesiredScale = newScale;
+            Downsampling = ds;
+
+            if (aspectChanged)
+            {
+                // Leaving Letterbox has to hand the RawImage back to the game, or it stays fitted to the
+                // old aspect. Entering it needs the cursor patch, without which every menu button would
+                // be offset by the width of the bars.
+                Presentation.Mode = am;
+                if (am == AspectMode.Letterbox) Presentation.InstallMousePatch();
+                else Presentation.Restore();
+                Log.LogInfo($"options: aspect mode -> {Presentation.Mode}");
+            }
+
+            if (rebuildNeeded && Futile.instance != null && Futile.screen != null)
+            {
+                // Go through the game's own UpdateScreenWidth rather than ReinitRenderTexture directly:
+                // it is the only path that also rebinds camera.targetTexture and the presenting RawImage,
+                // so shrinking the scale cannot leave them pointing at a released texture.
+                Log.LogInfo($"options: rebuilding render texture for supersample={newScale} downsample={ds}");
+                Futile.instance.UpdateScreenWidth(Futile.screen.pixelWidth);
+            }
+
+            // Re-assert the backbuffer; harmless when nothing changed, and picks up NativeBackbuffer
+            // being switched back on.
+            self.attempts = 0;
+            self.pendingW = 0;
+            self.frameCounter = 30;
+        }
 
         public void OnEnable()
         {
@@ -187,12 +245,15 @@ namespace TrueResolution
             renderTextureProp = typeof(FScreen).GetProperty(
                 "renderTexture", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
+            self = this;
+
             On.FScreen.ctor += FScreen_ctor;
             On.FScreen.ReinitRenderTexture += FScreen_ReinitRenderTexture;
             On.FScreen.UpdateScreenOffset += FScreen_UpdateScreenOffset;
             On.Futile.Init += Futile_Init;
             On.Futile.UpdateCameraPosition += Futile_UpdateCameraPosition;
             On.Options.OnLoadFinished += Options_OnLoadFinished;
+            On.RainWorld.OnModsInit += RainWorld_OnModsInit;
 
             if (Presentation.Active) Presentation.InstallMousePatch();
 
@@ -499,6 +560,32 @@ namespace TrueResolution
         }
 
         // ---------------------------------------------------------------- hooks
+
+        /// <summary>
+        /// Registers the Remix options page. This is the only correct place: the mod id must be registered
+        /// after the mod list exists, and OnModsInit is where every Rain World mod does it. Failure here is
+        /// non-fatal - the BepInEx config file still works, you just lose the in-game page.
+        /// </summary>
+        private static void RainWorld_OnModsInit(On.RainWorld.orig_OnModsInit orig, RainWorld rw)
+        {
+            orig(rw);
+            if (optionsRegistered) return;
+            try
+            {
+                optionsUI = new TrueResolutionOptions();
+                // Must match "id" in modinfo.json, or Remix cannot pair the page with the mod.
+                optionsRegistered = MachineConnector.SetRegisteredOI("trueresolution", optionsUI);
+                Log.LogInfo(optionsRegistered
+                    ? "options: registered the in-game Remix config page"
+                    : "options: SetRegisteredOI returned false; use the BepInEx config file instead");
+            }
+            catch (Exception e)
+            {
+                optionsUI = null;
+                Log.LogError("options: could not register the Remix config page, falling back to the "
+                             + "BepInEx config file: " + e);
+            }
+        }
 
         private static void FScreen_ctor(On.FScreen.orig_ctor orig, FScreen self, FutileParams futileParams)
         {

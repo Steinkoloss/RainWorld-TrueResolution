@@ -156,6 +156,38 @@ namespace TrueResolution
         }
 
         /// <summary>
+        /// Hand the RawImage back to the game: full-stretch anchors, no backdrop, and stop correcting the
+        /// cursor. Needed when the user switches away from Letterbox at runtime, otherwise the picture
+        /// stays fitted to the aspect ratio we last computed. Leaves uvRect alone - Futile rewrites it in
+        /// UpdateCameraPosition, which is exactly the vanilla behaviour we are restoring.
+        /// </summary>
+        internal static void Restore()
+        {
+            RemoveMousePatch();
+            pictureValid = false;
+
+            if (imageRT != null)
+            {
+                imageRT.anchorMin = Vector2.zero;
+                imageRT.anchorMax = Vector2.one;
+                imageRT.sizeDelta = Vector2.zero;
+                imageRT.anchoredPosition = Vector2.zero;
+            }
+
+            if (backdrop != null)
+            {
+                UnityEngine.Object.Destroy(backdrop.gameObject);
+                backdrop = null;
+            }
+
+            // Force Apply() to recompute from scratch if Letterbox is switched back on.
+            lastFx = lastFy = -1f;
+            lastBackbufferW = lastBackbufferH = 0;
+
+            Plugin.Log.LogInfo("presentation: restored vanilla full-stretch presentation");
+        }
+
+        /// <summary>
         /// Repoint the presenting RawImage at a different render texture, used when the render target is
         /// swapped for a mipmapped one. Presentation owns the RawImage reference, so it owns the rebind.
         /// A no-op before Futile.Init has produced the RawImage, which is harmless: Futile.Init
