@@ -1,0 +1,148 @@
+<!--
+  Resolves $(RainWorldDir) into $(ManagedDir) / $(BepInExDir) / $(RwModsDir),
+  or fails with an actionable message; expands @(RwGameReference); stages the
+  drop-in mod folder; packages the release zip.
+
+  Detection lives in a target because MSBuild forbids %(Identity) in item
+  conditions outside targets, and the Steam library list is itself read out of
+  libraryfolders.vdf. LocateRainWorld runs before ResolveAssemblyReferences,
+  the target that consumes Reference/HintPath.
+-->
+<Project>
+
+  <Target Name="LocateRainWorld" BeforeTargets="ResolveAssemblyReferences">
+
+    <!-- ============================================================= Steam -->
+    <ItemGroup>
+      <_RwVdf Include="@(RwSteamRoot->'%(Identity)/steamapps/libraryfolders.vdf')" Condition="Exists('%(Identity)/steamapps/libraryfolders.vdf')" />
+      <_RwVdf Include="@(RwSteamRoot->'%(Identity)/config/libraryfolders.vdf')"    Condition="Exists('%(Identity)/config/libraryfolders.vdf')" />
+    </ItemGroup>
+
+    <!-- Batches once per vdf. ReadLinesFromFile rather than File::ReadAllText
+         because a property function cannot be called inside an item transform. -->
+    <!-- The Condition is required, not defensive: batching over an empty item
+         list still invokes the task once, with File empty, which is MSB4044.
+         That is the normal case for anyone whose Steam lives somewhere we did
+         not guess, and it has to degrade to "keep looking", not "hard error". -->
+    <ReadLinesFromFile File="%(_RwVdf.Identity)" Condition="'@(_RwVdf)' != ''">
+      <Output TaskParameter="Lines" ItemName="_RwVdfLine" />
+    </ReadLinesFromFile>
+
+    <ItemGroup>
+      <!-- A library entry looks like:   \t\t"path"\t\t"/home/you/Steam"
+           and on Windows the backslashes are doubled:  "D:\\SteamLibrary".
+           Stripping the key, then the quotes, then trimming, is enough; no
+           regex, which keeps this readable and avoids MSBuild's escaping of
+           ';' in property-function results. -->
+      <_RwPathLine Include="@(_RwVdfLine)" Condition="$([System.String]::Copy('%(Identity)').Contains('&quot;path&quot;'))" />
+      <_RwLib Include="@(_RwPathLine->Replace('&quot;path&quot;','')->Replace('&quot;','')->Replace('\\','\')->Trim()->Distinct())" />
+      <!-- A Steam root is itself a library even when the vdf omits it. -->
+      <_RwLib Include="@(RwSteamRoot)" />
+    </ItemGroup>
+
+    <ItemGroup>
+
+      <_RwSearch Include="@(_RwLib->'%(Identity)/steamapps/common/Rain World')" />
+      <_RwSearch Include="@(RwFixedCandidate)" />
+
+      <!-- Probe the DLL we actually need. The folder existing proves nothing
+           (half-uninstalled Steam games leave it behind) and RainWorld.exe is
+           absent from a generated reference root. -->
+      <_RwHit Include="@(_RwSearch)" Condition="Exists('%(Identity)/RainWorld_Data/Managed/Assembly-CSharp.dll')" />
+    </ItemGroup>
+
+    <PropertyGroup>
+      <_RwHits>@(_RwHit)</_RwHits>
+      <RainWorldDir Condition="'$(RainWorldDir)' == '' And '$(_RwHits)' != ''">$(_RwHits.Split(';')[0])</RainWorldDir>
+    </PropertyGroup>
+
+    <!-- ============================================================ report -->
+    <Error Condition="'$(RainWorldDir)' == ''" Code="RWFIX001"
+           Text="Could not find a Rain World installation.%0A%0AThis project compiles against three DLLs that ship with Rain World. They are not redistributable, so the build has to be pointed at a copy you own.%0A%0APick one:%0A  1.  dotnet build -p:RainWorldDir=&quot;/full/path/to/Rain World&quot;%0A  2.  set RW_DIR to that path and re-run   (install.sh and install.ps1 do this for you)%0A  3.  run tools/make-refs.sh once to generate ./refs/ from your install; after that, builds need no game at all%0A%0AThe path must be the folder that contains RainWorld.exe and RainWorld_Data.%0ASearched every Steam library listed in libraryfolders.vdf, plus common non-Steam locations." />
+
+    <Error Condition="!Exists('$(RainWorldDir)/RainWorld_Data/Managed/Assembly-CSharp.dll')" Code="RWFIX002"
+           Text="RainWorldDir is '$(RainWorldDir)' but '$(RainWorldDir)/RainWorld_Data/Managed/Assembly-CSharp.dll' does not exist. Point RainWorldDir at the folder that contains RainWorld.exe, not at RainWorld_Data or at the Steam library." />
+
+    <PropertyGroup>
+      <RainWorldDir>$(RainWorldDir.TrimEnd('/').TrimEnd('\'))</RainWorldDir>
+      <ManagedDir>$(RainWorldDir)/RainWorld_Data/Managed</ManagedDir>
+      <BepInExDir>$(RainWorldDir)/BepInEx</BepInExDir>
+      <RwModsDir>$(RainWorldDir)/RainWorld_Data/StreamingAssets/mods</RwModsDir>
+    </PropertyGroup>
+
+    <Error Condition="!Exists('$(BepInExDir)/plugins/HOOKS-Assembly-CSharp.dll')" Code="RWFIX003"
+           Text="Found Rain World at '$(RainWorldDir)' but BepInEx/plugins/HOOKS-Assembly-CSharp.dll is missing. That file ships with the game (BepInEx has been bundled since v1.9), so this install is either older than v1.9 or has had BepInEx deleted. In Steam: Rain World -> Properties -> Installed Files -> Verify integrity of game files." />
+
+    <Message Importance="high" Text="Rain World references resolved from: $(RainWorldDir)" />
+
+    <!-- =========================================== expand @(RwGameReference)
+         Private=false throughout: the game supplies every one of these at
+         runtime, and shipping a second copy beside the plugin causes duplicate
+         assembly loads. -->
+    <ItemGroup>
+      <Reference Include="@(RwGameReference)" Condition="'%(RwGameReference.Dir)' == 'Managed'">
+        <HintPath>$(ManagedDir)/%(RwGameReference.Identity).dll</HintPath>
+        <Private>false</Private>
+      </Reference>
+      <Reference Include="@(RwGameReference)" Condition="'%(RwGameReference.Dir)' == 'BepInExPlugins'">
+        <HintPath>$(BepInExDir)/plugins/%(RwGameReference.Identity).dll</HintPath>
+        <Private>false</Private>
+      </Reference>
+      <Reference Include="@(RwGameReference)" Condition="'%(RwGameReference.Dir)' == 'BepInExCore'">
+        <HintPath>$(BepInExDir)/core/%(RwGameReference.Identity).dll</HintPath>
+        <Private>false</Private>
+      </Reference>
+    </ItemGroup>
+
+    <!-- A missing HintPath makes RAR silently fall back to a framework probe and
+         the failure then surfaces as a confusing CS0246 on a game type. Name the
+         actual missing file instead. -->
+    <ItemGroup>
+      <_RwMissingRef Include="@(Reference)" Condition="'@(RwGameReference)' != '' And '%(Reference.HintPath)' != '' And !Exists('%(Reference.HintPath)')" />
+    </ItemGroup>
+    <Error Condition="'@(_RwMissingRef)' != ''" Code="RWFIX004"
+           Text="Missing game assembly under '$(RainWorldDir)': @(_RwMissingRef->'%(HintPath)', ', '). In Steam: Rain World -> Properties -> Installed Files -> Verify integrity of game files." />
+  </Target>
+
+  <!-- ==================================================== mod folder layout
+       Stages $(ModStageDir) = bin/mod/<ModId>/ exactly as it must appear under
+       RainWorld_Data/StreamingAssets/mods/, so the installers and the release
+       zip both copy a directory that is already correct.
+
+       The layout is dictated by the game, not by preference:
+         <id>/modinfo.json    read from the mod root    ModManager.cs:4001-4005
+         <id>/thumbnail.png   read from the mod root    ModManager.cs:174-182
+         <id>/plugins/*.dll   scanned for BepInPlugins  ModManager.cs:3717
+                                                        MultiFolderLoader.cs:536
+       plugins/ may also be nested under newest/ or v1.11.8/ , which take
+       precedence (MultiFolderLoader.cs:506-536). We use the plain form: it
+       applies to every game version, and a v1.11.8/ folder would silently stop
+       being used the moment the game version string changes. -->
+  <Target Name="StageModFolder" AfterTargets="Build"
+          Inputs="$(TargetPath);@(ModContent)"
+          Outputs="$(ModStageDir)plugins/$(TargetFileName)">
+    <RemoveDir Directories="$(ModStageDir)" />
+    <Copy SourceFiles="@(ModContent)" DestinationFolder="$(ModStageDir)%(RecursiveDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ModStageDir)plugins" />
+    <!-- A .pdb is useful while developing and dead weight in a release. -->
+    <Copy SourceFiles="@(_DebugSymbolsIntermediatePath)" DestinationFolder="$(ModStageDir)plugins"
+          Condition="'$(Configuration)' == 'Debug'" />
+    <Message Importance="high" Text="Staged mod folder: $([System.IO.Path]::GetFullPath('$(ModStageDir)'))" />
+  </Target>
+
+  <!-- ============================================================== release
+       dotnet build -c Release -t:PackageMod
+       Writes bin/dist/<ModZipName>-v<Version>.zip whose only top-level entry is
+       the mod id folder, so extracting it into mods/ is the whole install. -->
+  <Target Name="PackageMod" DependsOnTargets="Build">
+    <PropertyGroup>
+      <_RwDistDir>$(MSBuildThisFileDirectory)../bin/dist</_RwDistDir>
+      <ModZipPath>$(_RwDistDir)/$(ModZipName)-v$(Version).zip</ModZipPath>
+    </PropertyGroup>
+    <MakeDir Directories="$(_RwDistDir)" />
+    <Delete Files="$(ModZipPath)" />
+    <ZipDirectory SourceDirectory="$(MSBuildThisFileDirectory)../bin/mod" DestinationFile="$(ModZipPath)" />
+    <Message Importance="high" Text="Wrote $([System.IO.Path]::GetFullPath('$(ModZipPath)'))" />
+  </Target>
+
+</Project>

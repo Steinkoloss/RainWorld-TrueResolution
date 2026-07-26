@@ -1,0 +1,18 @@
+{
+	"id": "trueresolution",
+	"name": "True Resolution",
+	"version": "1.1.0",
+	"target_game_version": "v1.11",
+	"authors": "Steinkoloss",
+	"description": "Renders the game at your monitor's actual resolution instead of its tiny fixed internal buffer.<LINE> <LINE>Rain World draws everything into a render texture pinned to 768 pixels tall (1024-1366 wide depending on the aspect-ratio option) and then forces the window down to match, so on a high-resolution display the image gets scaled up twice and looks soft. This mod supersamples the render texture and, in fullscreen, presents at your display's native resolution, without changing how much of the room you can see - framing, camera behaviour and gameplay are untouched.<LINE> <LINE>Configure the supersampling factor in BepInEx/config/steinkoloss.trueresolution.cfg.",
+	"tags": [
+		"Cosmetics",
+		"Accessibility",
+		"Base",
+		"Downpour",
+		"Watcher"
+	],
+	"requirements": [],
+	"requirements_names": [],
+	"checksum_override_version": true
+}

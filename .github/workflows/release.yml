@@ -1,0 +1,153 @@
+name: Release
+
+# Cuts a GitHub release from a v* tag.
+#
+# The zip it produces has exactly one top-level entry, the mod id folder, so
+# "extract into RainWorld_Data/StreamingAssets/mods" is the complete install
+# instruction. That layout is dictated by the game: ModManager.cs:3737 scans
+# StreamingAssets/mods for directories, ModManager.cs:4001-4005 reads
+# modinfo.json from each one's root, and MultiFolderLoader.cs:536 loads DLLs
+# from <mod>/plugins.
+#
+# Requires RW_REFS_REPO / RW_REFS_TOKEN (see docs/RELEASING.md). Without them
+# the job stops early with instructions, because building here is impossible:
+# three of the referenced assemblies ship with the game. Use tools/release.sh
+# from a machine that has Rain World instead - that path needs no secrets and
+# produces the identical zip.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and release (e.g. v1.0.2)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      # Releases are normally cut locally with tools/release.sh, which needs no
+      # secrets because the developer's machine has the game. This runner can
+      # only build if private reference assemblies are configured, so when they
+      # are absent the job SKIPS rather than fails - a red X on every tag would
+      # just be noise for something that is working as designed.
+      - name: Check whether private refs are configured
+        id: cfg
+        env:
+          REFS_REPO: ${{ secrets.RW_REFS_REPO }}
+          REFS_TOKEN: ${{ secrets.RW_REFS_TOKEN }}
+        run: |
+          if [ -n "$REFS_REPO" ] && [ -n "$REFS_TOKEN" ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::RW_REFS_REPO / RW_REFS_TOKEN are not configured, so this runner cannot compile the plugin (three referenced assemblies ship with the game). This tag was almost certainly released with tools/release.sh from a machine that has Rain World, which produces an identical zip. See docs/RELEASING.md to enable building here instead."
+          fi
+
+      - name: Validate metadata before publishing anything
+        if: steps.cfg.outputs.have == 'true'
+        run: python3 tools/check-metadata.py
+
+      - name: Assert the tag matches mod/modinfo.json
+        if: steps.cfg.outputs.have == 'true'
+        # A tag that disagrees with the version users see in Remix produces
+        # unanswerable bug reports.
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          declared=$(python3 -c "import json;print(json.load(open('mod/modinfo.json'))['version'])")
+          if [ "$tag" != "v$declared" ]; then
+            echo "::error::tag $tag does not match mod/modinfo.json version $declared (expected tag v$declared)"
+            exit 1
+          fi
+          echo "version=$declared" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+        if: steps.cfg.outputs.have == 'true'
+        with:
+          repository: ${{ secrets.RW_REFS_REPO }}
+          token: ${{ secrets.RW_REFS_TOKEN }}
+          path: refs-src
+
+      - name: Stage refs/
+        if: steps.cfg.outputs.have == 'true'
+        run: |
+          set -euo pipefail
+          if [ -d refs-src/refs ]; then mv refs-src/refs refs; else mv refs-src refs; fi
+          test -f refs/RainWorld_Data/Managed/Assembly-CSharp.dll
+          test -f refs/BepInEx/plugins/HOOKS-Assembly-CSharp.dll
+          echo "--- refs generated from:"
+          cat refs/GAME_VERSION.txt 2>/dev/null || echo "(no GAME_VERSION.txt)"
+
+      - uses: actions/setup-dotnet@v4
+        if: steps.cfg.outputs.have == 'true'
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build and package
+        if: steps.cfg.outputs.have == 'true'
+        run: dotnet build -c Release -warnaserror -p:RainWorldDir=refs -t:PackageMod
+
+      - name: Checksum and show the zip layout
+        if: steps.cfg.outputs.have == 'true'
+        run: |
+          set -euo pipefail
+          cd bin/dist
+          sha256sum *.zip | tee SHA256SUMS.txt
+          echo "--- archive contents (must be a single top-level 'trueresolution/'):"
+          python3 - <<'PY'
+          import glob, zipfile
+          z = zipfile.ZipFile(glob.glob("*.zip")[0])
+          for i in z.infolist():
+              print(f"{i.file_size:>10}  {i.filename}")
+          tops = {n.split('/')[0] for n in z.namelist()}
+          assert tops == {"trueresolution"}, f"unexpected top-level entries: {tops}"
+          PY
+
+      - name: Create the release
+        if: steps.cfg.outputs.have == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+
+          # Release notes are the matching CHANGELOG section, so the changelog
+          # stays the single place the history is written.
+          python3 - "$version" > NOTES.md <<'PY'
+          import re, sys, pathlib
+          v = sys.argv[1]
+          text = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          m = re.search(rf"^##\s*\[?{re.escape(v)}\]?.*?$(.*?)(?=^##\s|\Z)", text, re.M | re.S)
+          print((m.group(1).strip() if m else "See CHANGELOG.md.") + "\n")
+          PY
+
+          cat >> NOTES.md <<'EOF'
+
+          ## Install
+
+          1. Download the zip below.
+          2. Extract it into `Rain World/RainWorld_Data/StreamingAssets/mods/`
+             so that you end up with `mods/trueresolution/modinfo.json`.
+          3. Launch the game, then main menu -> **Remix** -> enable
+             **True Resolution** -> Apply -> restart.
+
+          Linux/Proton users: set the launch option
+          `WINEDLLOVERRIDES="winhttp=n,b" %command%` first, or BepInEx never
+          injects and no mod loads. See the README.
+          EOF
+
+          gh release create "$tag" \
+            --title "True Resolution $tag" \
+            --notes-file NOTES.md \
+            bin/dist/*.zip bin/dist/SHA256SUMS.txt

@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------- build output
+bin/
+obj/
+artifacts/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+.vscode/
+.idea/
+*.swp
+*~
+
+# ---------------------------------------------------------- game-derived files
+# refs/ holds reference assemblies generated from the installed game by
+# tools/make-refs.sh. They contain no method bodies, but they are still a
+# mechanical derivative of Videocult's copyrighted code and there is no licence
+# that lets anyone redistribute them.
+#
+# NEVER commit this directory to a public repository. If you want CI to compile,
+# push it to a PRIVATE repo instead - see docs/RELEASING.md.
+refs/
+
+# Any stray copy of a game assembly, however it got here.
+Assembly-CSharp.dll
+Assembly-CSharp-firstpass.dll
+HOOKS-Assembly-CSharp.dll
+PUBLIC-Assembly-CSharp.dll
+UnityEngine*.dll
+UnityPlayer.dll
+BepInEx.dll
+0Harmony.dll
+lib/
+Managed/
+
+# Locally installed dotnet tools (refasmer)
+.tools/
+
+# ------------------------------------------------------------------ log noise
+LogOutput.log
+output_log.txt
+*.log

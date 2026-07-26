@@ -1,0 +1,14 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Rain World Modding wiki
+    url: https://rainworldmodding.miraheze.org/wiki/Main_Page
+    about: How BepInEx plugins, Remix and the mods folder work in general.
+  - name: Rain World Modding Discord
+    url: https://discord.gg/kPGJNhrnu2
+    about: Faster than an issue for "is this mod even loading" questions, and where the modding community actually lives.
+  - name: Official Rain World Discord
+    url: https://discord.gg/rainworld
+    about: Has modding channels too.
+  - name: RainDB
+    url: https://raindb.net/
+    about: Browse and download Rain World mods. It mirrors the Steam Workshop.

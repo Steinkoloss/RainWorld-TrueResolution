@@ -1,0 +1,115 @@
+name: Bug report
+description: Something looks wrong, or the mod does nothing
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before filing: 90% of "the mod does nothing" reports are one of two things.**
+
+        1. **Linux / Steam Deck / Proton.** Rain World is a Windows build, so Wine
+           loads its own `winhttp.dll` and ignores the BepInEx shim in the game
+           folder. Nothing loads, silently. Fix: Steam → Rain World → Properties
+           → Launch Options → `WINEDLLOVERRIDES="winhttp=n,b" %command%`
+        2. **Not enabled in Remix.** Main menu → Remix → enable **Resolution
+           Fix** → Apply → restart. Also required again after any game update,
+           because the loader blanks the enabled list when the game version
+           changes.
+
+        The log excerpt below tells the two apart instantly, so please include it.
+
+  - type: textarea
+    id: log
+    attributes:
+      label: BepInEx log lines
+      description: |
+        Run this and paste the output. If the file does not exist at all, say so
+        — that is itself the answer (BepInEx is not injecting; see point 1).
+
+        **Windows** (PowerShell), adjust the path to your install:
+        ```
+        Select-String -Path "C:\Program Files (x86)\Steam\steamapps\common\Rain World\BepInEx\LogOutput.log" `
+          -Pattern 'True Resolution|display probe|render texture is now|backbuffer:|FScreen:'
+        ```
+
+        **Linux / macOS**:
+        ```
+        grep -E 'True Resolution|display probe|render texture is now|backbuffer:|FScreen:' \
+          "$HOME/.local/share/Steam/steamapps/common/Rain World/BepInEx/LogOutput.log"
+        ```
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: display
+    attributes:
+      label: Display resolution and refresh rate
+      placeholder: "3440x1440 @ 144 Hz, single monitor"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Platform
+      options:
+        - Windows (native)
+        - Linux (Proton)
+        - Steam Deck
+        - macOS
+        - Linux (native build, if one exists)
+    validations:
+      required: true
+
+  - type: input
+    id: ingame_res
+    attributes:
+      label: In-game resolution / aspect option
+      description: Options → the resolution dropdown. This is the mod's logical size and it matters a lot.
+      placeholder: "1366x768"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: fullscreen
+    attributes:
+      label: Fullscreen or windowed
+      description: NativeBackbuffer deliberately does nothing in windowed mode.
+      options: [Fullscreen, Windowed]
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Contents of BepInEx/config/steinkoloss.trueresolution.cfg
+      render: ini
+
+  - type: textarea
+    id: mods
+    attributes:
+      label: Other mods enabled
+      description: |
+        Especially anything that touches rendering or resolution. Known
+        conflicts: **Sharpener** (hooks Unity's `Screen` class, so it and this
+        mod fight over the backbuffer), **PixelPerfect**, **PixelPerfectFor1080p**,
+        **No More Fullscreen Blur**, **Number Fixes**.
+      placeholder: "trueresolution, moreslugcats, ..."
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What you expected vs what happened
+    validations:
+      required: true
+
+  - type: textarea
+    id: shots
+    attributes:
+      label: Screenshots
+      description: |
+        A vanilla/modded pair at the same spot is worth a lot for sharpness
+        reports. Take them at your native resolution and do not let anything
+        rescale them — a resized screenshot destroys the exact thing being
+        reported. PNG, not JPEG.

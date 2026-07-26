@@ -1,0 +1,643 @@
+using System;
+using System.Reflection;
+using System.Security;
+using System.Security.Permissions;
+using BepInEx;
+using BepInEx.Configuration;
+using BepInEx.Logging;
+using UnityEngine;
+
+// BepInEx 5 on a Unity 2020.3 Mono runtime needs this to allow publicized/private access via MonoMod.
+[module: UnverifiableCode]
+#pragma warning disable CS0618
+[assembly: SecurityPermission(SecurityAction.RequestMinimum, SkipVerification = true)]
+#pragma warning restore CS0618
+
+namespace TrueResolution
+{
+    /// <summary>
+    /// Rain World renders the whole game into a RenderTexture that is hardcoded to 768 pixels tall
+    /// (FScreen ctor) and 1024-1366 wide depending on the aspect-ratio option
+    /// (Options.screenResolutions), and then forces the actual window/backbuffer to that same tiny
+    /// size (Options.OnLoadFinished -> Screen.SetResolution). On a high-res display the result is
+    /// scaled up twice, which is why the game looks soft.
+    ///
+    /// This plugin fixes both halves without touching the game's world-space framing:
+    ///
+    ///  1. Supersampling. FScreen already has a "renderScale" multiplier that sizes the RenderTexture
+    ///     (pixelWidth * renderScale, pixelHeight * renderScale) but the constructor pins it to 1.
+    ///     Crucially the Futile camera's orthographicSize is derived from pixelHeight, NOT from the
+    ///     RenderTexture size (Futile.InitCamera / Futile.UpdateCameraPosition), so raising renderScale
+    ///     increases pixel density while showing the exact same slice of the world.
+    ///
+    ///  2. Native backbuffer. We let the game keep its logical screen (gameplay visibility checks,
+    ///     shader globals and room framing all derive from Options.ScreenSize) but present it into a
+    ///     backbuffer at the display's real resolution, so the final composite is one clean filtered
+    ///     scale instead of a hardware stretch of an already-small image.
+    ///
+    /// Invariants this plugin must never break: it never writes FScreen.pixelWidth, FScreen.pixelHeight,
+    /// Options.screenResolutions or Options.ScreenSize.
+    /// </summary>
+    [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
+    public class Plugin : BaseUnityPlugin
+    {
+        public const string PluginGuid = "steinkoloss.trueresolution";
+        public const string PluginName = "True Resolution";
+        public const string PluginVersion = "1.1.0";
+
+        internal static ManualLogSource Log;
+
+        private ConfigEntry<int> cfgSupersample;
+        private ConfigEntry<bool> cfgNativeBackbuffer;
+        private ConfigEntry<int> cfgTargetWidth;
+        private ConfigEntry<int> cfgTargetHeight;
+        private ConfigEntry<bool> cfgSmoothDownsample;
+        private ConfigEntry<bool> cfgLegacyScreenOffset;
+        private ConfigEntry<AspectMode> cfgAspectMode;
+
+        /// <summary>Cached private setter for FScreen.renderScale (auto-property with a private set).</summary>
+        private static PropertyInfo renderScaleProp;
+        private static FieldInfo renderScaleField;
+
+        /// <summary>Guards the ReinitRenderTexture hook against re-entering itself while we rebuild.</summary>
+        private static bool rebuilding;
+
+        private static int DesiredScale = 2;
+        private static bool SmoothDownsample = true;
+        private static bool LegacyScreenOffset;
+
+        private bool hooksApplied;
+
+        // ---- display probe, resolved exactly once, at OnEnable (i.e. before the game has had any
+        // chance to shrink the backbuffer) so we can never read our own forced window size back.
+        private static int nativeW = -1, nativeH = -1;
+        private static string nativeHow = "unresolved";
+
+        // ---- backbuffer request state. Screen.SetResolution is a *request* applied at the next frame
+        // boundary and it has no failure signal, so every request is verified and bounded.
+        private int pendingW, pendingH, pendingFrames;
+        private int attempts;
+        private int confirmedW = -1, confirmedH = -1;
+        private int frameCounter;
+        private const int VerifyFrames = 20;
+        private const int MaxAttempts = 4;
+
+        private static Options lastOptions;
+        private bool loggedUpdateFailure;
+        private bool loggedPresentationFailure;
+
+        public void OnEnable()
+        {
+            Log = Logger;
+
+            cfgSupersample = Config.Bind(
+                "Rendering", "Supersample", 2,
+                new ConfigDescription(
+                    "Internal render scale. The game renders the same view at this multiple of its "
+                    + "internal 768-pixel-tall buffer (1024-1366 wide depending on the aspect-ratio "
+                    + "option), then it is filtered down to your screen. 2 is the sweet spot. "
+                    + "3 and 4 are GPU headroom only - Rain World's renderer is fill-bound and uses "
+                    + "100+ GrabPasses, so the cost scales with the square of this value. "
+                    + "1 disables supersampling.",
+                    new AcceptableValueRange<int>(1, 4)));
+
+            cfgNativeBackbuffer = Config.Bind(
+                "Rendering", "NativeBackbuffer", true,
+                "In fullscreen only, present at the display's native resolution instead of letting the "
+                + "game force the window down to its internal buffer size. This is usually the single "
+                + "biggest visual win. Windowed mode is left alone.");
+
+            cfgTargetWidth = Config.Bind(
+                "Rendering", "TargetWidth", 0,
+                "Fullscreen backbuffer width. 0 = auto-detect the display's native width. "
+                + "Set this together with TargetHeight if auto-detect logs the wrong size.");
+
+            cfgTargetHeight = Config.Bind(
+                "Rendering", "TargetHeight", 0,
+                "Fullscreen backbuffer height. 0 = auto-detect the display's native height.");
+
+            cfgSmoothDownsample = Config.Bind(
+                "Rendering", "SmoothDownsample", true,
+                "Filter the render texture when it is not composited pixel-exactly onto the backbuffer. "
+                + "Turn this off only if you want a hard pixelated look (it will alias badly).");
+
+            cfgLegacyScreenOffset = Config.Bind(
+                "Compatibility", "LegacyScreenOffset", false,
+                "Diagnostic A/B switch. Raising renderScale above 1 moves FScreen.UpdateScreenOffset onto "
+                + "a branch that is dead code in stock Rain World and shifts the camera by half a logical "
+                + "unit. Enable this to force the stock renderScale==1 offset instead. Only touch this if "
+                + "you are chasing a half-pixel shift; it is not obviously more correct either way.");
+
+            cfgAspectMode = Config.Bind(
+                "Rendering", "AspectMode", AspectMode.Letterbox,
+                "How the game's ~16:9 logical picture is fitted into your display.\n"
+                + "Letterbox (recommended): keep the backbuffer at your panel's native size and draw black "
+                + "bars inside the game. Correct and identical on every platform, driver and graphics API. "
+                + "Required on 21:9 / 32:9 / 4:3 / 16:10 panels, a no-op on 16:9.\n"
+                + "AspectBackbuffer: ask Unity for a backbuffer that already has the logical aspect ratio "
+                + "and let FullScreenMode.FullScreenWindow letterbox it. Documented behaviour, but there "
+                + "are known Unity bugs where it silently stretches instead, and it costs an extra "
+                + "rescale. Only use this if Letterbox misbehaves.\n"
+                + "Stretch: vanilla behaviour. The picture is distorted on any non-16:9 display.");
+
+            DesiredScale = Mathf.Clamp(cfgSupersample.Value, 1, 4);
+            SmoothDownsample = cfgSmoothDownsample.Value;
+            LegacyScreenOffset = cfgLegacyScreenOffset.Value;
+            Presentation.Mode = cfgAspectMode.Value;
+
+            renderScaleProp = typeof(FScreen).GetProperty(
+                "renderScale", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            renderScaleField = typeof(FScreen).GetField(
+                "<renderScale>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic);
+
+            On.FScreen.ctor += FScreen_ctor;
+            On.FScreen.ReinitRenderTexture += FScreen_ReinitRenderTexture;
+            On.FScreen.UpdateScreenOffset += FScreen_UpdateScreenOffset;
+            On.Futile.Init += Futile_Init;
+            On.Futile.UpdateCameraPosition += Futile_UpdateCameraPosition;
+            On.Options.OnLoadFinished += Options_OnLoadFinished;
+
+            if (Presentation.Active) Presentation.InstallMousePatch();
+
+            hooksApplied = true;
+
+            Log.LogInfo($"{PluginName} {PluginVersion} loaded. cfg: supersample={DesiredScale} "
+                        + $"nativeBackbuffer={cfgNativeBackbuffer.Value} "
+                        + $"target={(cfgTargetWidth.Value > 0 ? cfgTargetWidth.Value + "x" + cfgTargetHeight.Value : "auto")} "
+                        + $"smoothDownsample={SmoothDownsample} legacyScreenOffset={LegacyScreenOffset}");
+            Log.LogInfo($"gfx: '{SystemInfo.graphicsDeviceVersion}' device='{SystemInfo.graphicsDeviceName}' "
+                        + $"-> Futile.isOpenGL will be {SystemInfo.graphicsDeviceVersion.Contains("OpenGL")}");
+            ProbeNative();
+        }
+
+        public void OnDisable()
+        {
+            if (!hooksApplied) return;
+            On.FScreen.ctor -= FScreen_ctor;
+            On.FScreen.ReinitRenderTexture -= FScreen_ReinitRenderTexture;
+            On.FScreen.UpdateScreenOffset -= FScreen_UpdateScreenOffset;
+            On.Futile.Init -= Futile_Init;
+            On.Futile.UpdateCameraPosition -= Futile_UpdateCameraPosition;
+            On.Options.OnLoadFinished -= Options_OnLoadFinished;
+            Presentation.RemoveMousePatch();
+            Presentation.Reset();
+            hooksApplied = false;
+        }
+
+        // ---------------------------------------------------------------- display probe
+
+        /// <summary>
+        /// Resolve the display's native size once, at plugin load, i.e. BEFORE Options.OnLoadFinished
+        /// has forced the backbuffer down. Reading it later risks reading back the size we ourselves
+        /// forced, which would silently turn the whole feature into a no-op.
+        /// </summary>
+        private static void ProbeNative()
+        {
+            if (nativeW > 0) return;
+
+            int dw = 0, dh = 0, cw = 0, ch = 0, mw = 0, mh = 0, modeCount = 0;
+            try { dw = Display.main.systemWidth; dh = Display.main.systemHeight; }
+            catch (Exception e) { Log.LogWarning("Display.main.system* threw: " + e.Message); }
+            try { Resolution c = Screen.currentResolution; cw = c.width; ch = c.height; }
+            catch (Exception e) { Log.LogWarning("Screen.currentResolution threw: " + e.Message); }
+            try
+            {
+                Resolution[] all = Screen.resolutions;
+                if (all != null)
+                {
+                    modeCount = all.Length;
+                    for (int i = 0; i < all.Length; i++)
+                        if ((long)all[i].width * all[i].height > (long)mw * mh) { mw = all[i].width; mh = all[i].height; }
+                }
+            }
+            catch (Exception e) { Log.LogWarning("Screen.resolutions threw: " + e.Message); }
+
+            Log.LogInfo($"display probe: Screen={Screen.width}x{Screen.height} fs={Screen.fullScreen} "
+                        + $"mode={Screen.fullScreenMode}");
+            Log.LogInfo($"display probe: currentResolution={cw}x{ch}  Display.main.system={dw}x{dh}  "
+                        + $"largestMode={mw}x{mh} ({modeCount} modes)");
+
+            // currentResolution and Display.main.system* both describe the *current display*, so taking
+            // the larger of the two is safe. The enumerated-mode maximum is only a last resort: a panel
+            // running at 2560x1440 still enumerates 3840x2160, and using that would allocate an
+            // oversized backbuffer that the compositor then has to shrink again.
+            if (cw > 0 || dw > 0)
+            {
+                if ((long)cw * ch >= (long)dw * dh) { nativeW = cw; nativeH = ch; nativeHow = "Screen.currentResolution"; }
+                else { nativeW = dw; nativeH = dh; nativeHow = "Display.main.system*"; }
+            }
+            else if (mw > 0)
+            {
+                nativeW = mw; nativeH = mh; nativeHow = "Screen.resolutions max (fallback)";
+            }
+            else
+            {
+                nativeHow = "FAILED";
+            }
+
+            if (nativeW > 0)
+            {
+                Log.LogInfo($"display probe: chose {nativeW}x{nativeH} via '{nativeHow}'");
+                if (nativeW <= 1366 && nativeH <= 768)
+                    Log.LogWarning($"display probe: {nativeW}x{nativeH} is not larger than the game's own "
+                                   + "buffer, so NativeBackbuffer will have nothing to do. If your display "
+                                   + "really is bigger, set TargetWidth/TargetHeight in the config.");
+            }
+            else
+            {
+                Log.LogError("display probe FAILED - NativeBackbuffer disabled unless you set "
+                             + "TargetWidth/TargetHeight in the config.");
+            }
+        }
+
+        // ---------------------------------------------------------------- render scale
+
+        private static void SetRenderScale(FScreen self, int scale)
+        {
+            // Prefer the real (private) setter so we do not depend on the compiler's backing-field name.
+            MethodInfo setter = renderScaleProp?.GetSetMethod(true);
+            if (setter != null)
+            {
+                setter.Invoke(self, new object[] { scale });
+                return;
+            }
+            if (renderScaleField != null)
+            {
+                renderScaleField.SetValue(self, scale);
+                return;
+            }
+            Log.LogError("Could not set FScreen.renderScale - supersampling disabled.");
+        }
+
+        /// <summary>
+        /// Makes the render texture match <see cref="DesiredScale"/>. Safe to call repeatedly.
+        /// Rebuilding goes through the game's own ReinitRenderTexture so the shader half-texel offset
+        /// (FScreen.UpdateScreenOffset) is recomputed exactly the way the game expects, and so other
+        /// mods' ReinitRenderTexture postfixes still run.
+        /// </summary>
+        private static void EnsureRenderScale(FScreen self)
+        {
+            if (self == null || rebuilding) return;
+
+            if (self.renderScale != DesiredScale)
+            {
+                SetRenderScale(self, DesiredScale);
+                if (self.renderScale != DesiredScale)
+                {
+                    Log.LogError($"renderScale is still {self.renderScale} after trying to set "
+                                 + $"{DesiredScale} - reflection failed, supersampling is OFF.");
+                    return;
+                }
+
+                rebuilding = true;
+                try
+                {
+                    // Re-run with the current width: this releases the old texture and allocates a new
+                    // one at pixelWidth * renderScale x pixelHeight * renderScale.
+                    self.ReinitRenderTexture(self.pixelWidth);
+                }
+                finally
+                {
+                    rebuilding = false;
+                }
+                Log.LogInfo($"render texture is now {self.pixelWidth * self.renderScale}x"
+                            + $"{self.pixelHeight * self.renderScale} "
+                            + $"(logical {self.pixelWidth}x{self.pixelHeight}, {self.renderScale}x supersampled)");
+            }
+
+            ApplyFilterMode(self);
+        }
+
+        /// <summary>
+        /// Point sampling is only correct when the render texture lands on the backbuffer pixel-exactly.
+        /// The stock code (FScreen.ReinitRenderTexture / Futile.Init) picks Point whenever the display is
+        /// at least 1366x768, which is right for vanilla's 1:1 blit but wrong once EITHER side of the
+        /// composite changes size. In particular 1360 -> 2560 (1.88x, non-integer) point-magnified in
+        /// engine is visibly worse than vanilla, so this must key on the RT-vs-backbuffer ratio, not on
+        /// renderScale.
+        /// </summary>
+        private static void ApplyFilterMode(FScreen self)
+        {
+            RenderTexture rt = self?.renderTexture;
+            if (rt == null) return;
+
+            int bbW = Screen.width, bbH = Screen.height;
+            int rtW = rt.width, rtH = rt.height;
+            if (bbW <= 0 || bbH <= 0 || rtW <= 0 || rtH <= 0) return;
+
+            FilterMode want;
+            if (!SmoothDownsample)
+            {
+                want = FilterMode.Point;
+            }
+            else
+            {
+                bool oneToOne = rtW == bbW && rtH == bbH;
+                bool intUpscale = !oneToOne
+                                  && rtW <= bbW && rtH <= bbH
+                                  && bbW % rtW == 0 && bbH % rtH == 0
+                                  && (bbW / rtW) == (bbH / rtH);
+                want = (oneToOne || intUpscale) ? FilterMode.Point : FilterMode.Bilinear;
+            }
+
+            if (rt.filterMode != want) rt.filterMode = want;
+        }
+
+        // ---------------------------------------------------------------- hooks
+
+        private static void FScreen_ctor(On.FScreen.orig_ctor orig, FScreen self, FutileParams futileParams)
+        {
+            orig(self, futileParams);
+            // The constructor just pinned renderScale to 1 and allocated a 1x texture; upgrade it.
+            try { EnsureRenderScale(self); }
+            catch (Exception e) { Log.LogError("FScreen ctor postfix failed, supersampling is OFF: " + e); }
+        }
+
+        private static void FScreen_ReinitRenderTexture(
+            On.FScreen.orig_ReinitRenderTexture orig, FScreen self, int displayWidth)
+        {
+            orig(self, displayWidth);
+            // orig() reallocated using the *current* renderScale. If that is already what we want the
+            // texture is correctly sized and we only need to restore the filter mode.
+            try
+            {
+                if (rebuilding) ApplyFilterMode(self);
+                else EnsureRenderScale(self);
+            }
+            catch (Exception e) { Log.LogError("ReinitRenderTexture postfix failed: " + e); }
+        }
+
+        private static void FScreen_UpdateScreenOffset(On.FScreen.orig_UpdateScreenOffset orig, FScreen self)
+        {
+            orig(self);
+            if (!LegacyScreenOffset || Futile.isOpenGL) return;
+            try
+            {
+                Futile.screenPixelOffset = new Vector2(0.5f * Futile.displayScaleInverse,
+                                                       0.5f * Futile.displayScaleInverse);
+                Shader.SetGlobalVector(RainWorld.ShadPropScreenOffset, Vector2.zero);
+            }
+            catch (Exception e) { Log.LogError("UpdateScreenOffset postfix failed: " + e); }
+        }
+
+        private static void Futile_Init(On.Futile.orig_Init orig, Futile self, FutileParams futileParams)
+        {
+            orig(self, futileParams);
+            // Futile.Init overwrites filterMode after constructing FScreen, so re-assert it here.
+            try
+            {
+                ApplyFilterMode(Futile.screen);
+                FScreen s = Futile.screen;
+                if (s != null && s.renderTexture != null)
+                    Log.LogInfo($"FScreen: logical {s.pixelWidth}x{s.pixelHeight} renderScale={s.renderScale} "
+                                + $"RT={s.renderTexture.width}x{s.renderTexture.height} "
+                                + $"filter={s.renderTexture.filterMode} | backbuffer {Screen.width}x{Screen.height} "
+                                + $"| isOpenGL={Futile.isOpenGL} screenPixelOffset={Futile.screenPixelOffset}");
+            }
+            catch (Exception e) { Log.LogError("Futile.Init postfix failed: " + e); }
+        }
+
+        /// <summary>
+        /// Futile.UpdateCameraPosition (Futile.cs:494-512) is the ONLY writer of _cameraImage.uvRect and
+        /// Futile.subjectToAspectRatioIrregularity in the whole game (verified by grep: Futile.cs:510/511
+        /// are the only assignments; the only reader of the flag is RoomCamera.cs:1289). It does NOT touch
+        /// the RectTransform, so our letterbox geometry is never undone and only the uvRect needs
+        /// re-asserting. Hooking here covers every path that can change it: Futile.Init (:224),
+        /// Futile.UpdateScreenWidth (:284) and the FScreen.originX/originY setters (FScreen.cs:34/:50).
+        /// </summary>
+        private static void Futile_UpdateCameraPosition(On.Futile.orig_UpdateCameraPosition orig, Futile self)
+        {
+            orig(self);
+            try { Presentation.Apply(); }
+            catch (Exception e) { Log.LogError("UpdateCameraPosition postfix failed: " + e); }
+        }
+
+        private void Options_OnLoadFinished(On.Options.orig_OnLoadFinished orig, Options self)
+        {
+            // Never swallow orig(): if it throws the game is half-initialised and continuing is worse.
+            orig(self);
+            try
+            {
+                lastOptions = self;
+                if (!cfgNativeBackbuffer.Value || !self.fullScreen) return;
+
+                int w, h;
+                if (!ResolveTarget(out w, out h)) return;
+
+                // orig() has just QUEUED Screen.SetResolution(ScreenSize, false) (Options.cs:1119).
+                // Unity applies that at the end of the frame, so Screen.width still reports whatever we
+                // set last time. Comparing against the live Screen here is exactly wrong - it would
+                // early-return and let the game's shrink win. Always re-request; Unity coalesces
+                // requests within a frame and the last one wins.
+                attempts = 0;   // fresh external cause, not a failed request of ours
+                pendingW = 0;   // supersede anything in flight
+                RequestBackbuffer(w, h, "Options.OnLoadFinished", true);
+            }
+            catch (Exception e) { Log.LogError("Options.OnLoadFinished postfix failed: " + e); }
+        }
+
+        // ---------------------------------------------------------------- backbuffer
+
+        private static Options CurrentOptions()
+        {
+            try
+            {
+                RainWorld rw = RWCustom.Custom.rainWorld;
+                if (rw != null && rw.options != null) return rw.options;
+            }
+            catch { }
+            return lastOptions;
+        }
+
+        /// <summary>The game's *intent*, not Unity's deferred state. Menu code does
+        /// SetResolution(..., false) and then Screen.fullScreen = x as two separate statements, so live
+        /// Screen.fullScreen reads false for a few frames during a transition.</summary>
+        private static bool WantsFullscreen()
+        {
+            Options o = CurrentOptions();
+            return o != null ? o.fullScreen : Screen.fullScreen;
+        }
+
+        private static Vector2 LogicalSize()
+        {
+            FScreen s = Futile.screen;
+            if (s != null && s.pixelWidth > 0 && s.pixelHeight > 0)
+                return new Vector2(s.pixelWidth, s.pixelHeight);
+            Options o = CurrentOptions();
+            return o != null ? o.ScreenSize : Vector2.zero;
+        }
+
+        private bool ResolveTarget(out int w, out int h)
+        {
+            w = 0; h = 0;
+
+            ProbeNative();
+
+            if (cfgTargetWidth.Value > 0 && cfgTargetHeight.Value > 0)
+            {
+                w = cfgTargetWidth.Value;
+                h = cfgTargetHeight.Value;
+            }
+            else
+            {
+                if (nativeW <= 0 || nativeH <= 0) return false;
+                w = nativeW; h = nativeH;
+            }
+
+            // Never ask for a fullscreen backbuffer larger than the panel. Unity documents that "if no
+            // matching resolution is supported, the closest one is used", so an oversized request does not
+            // fail loudly - it silently lands somewhere else and then our verify loop burns its whole
+            // attempt budget. This also covers a hand-edited TargetWidth/TargetHeight and is the guard
+            // that makes a sub-768p display (1280x720, 1024x600) degrade instead of thrash.
+            if (nativeW > 0 && nativeH > 0)
+            {
+                if (w > nativeW || h > nativeH)
+                {
+                    Log.LogInfo($"backbuffer: clamping requested {w}x{h} to panel {nativeW}x{nativeH}");
+                    w = Mathf.Min(w, nativeW);
+                    h = Mathf.Min(h, nativeH);
+                }
+            }
+
+            // AspectBackbuffer mode only: shrink the request so the backbuffer already carries the logical
+            // aspect ratio and Unity's own FullScreenWindow letterboxing has nothing to correct. In
+            // Letterbox mode we deliberately keep the FULL native size and put the bars inside the game
+            // instead - that is the whole point, and it is what keeps the picture area a single clean
+            // filtered scale rather than two.
+            if (Presentation.Mode == AspectMode.AspectBackbuffer)
+            {
+                Vector2 s = LogicalSize();
+                if (s.x > 0f && s.y > 0f)
+                {
+                    float wantAspect = s.x / s.y;
+                    float haveAspect = (float)w / h;
+                    // 1360x768 (1.7708) vs 16:9 (1.7778) is 0.4% out and must pass through untouched;
+                    // 1024x768 (1.333), 1229x768 (1.600) and 1280x768 (1.667) are all >5% out and are
+                    // corrected.
+                    if (Mathf.Abs(wantAspect - haveAspect) > 0.02f)
+                    {
+                        if (wantAspect < haveAspect) w = Mathf.RoundToInt(h * wantAspect);
+                        else h = Mathf.RoundToInt(w / wantAspect);
+                        w -= w & 1;
+                        h -= h & 1;
+                    }
+                }
+            }
+
+            return w > 0 && h > 0;
+        }
+
+        private void RequestBackbuffer(int w, int h, string why, bool force)
+        {
+            if (pendingW != 0) return;
+            if (!force && Screen.width == w && Screen.height == h)
+            {
+                confirmedW = w; confirmedH = h;
+                return;
+            }
+            if (attempts >= MaxAttempts) return;
+
+            attempts++;
+            pendingW = w; pendingH = h; pendingFrames = VerifyFrames;
+            Log.LogInfo($"backbuffer: requesting {w}x{h} ({why}, attempt {attempts}/{MaxAttempts}); "
+                        + $"now {Screen.width}x{Screen.height} fs={Screen.fullScreen} mode={Screen.fullScreenMode}");
+            // Explicit FullScreenWindow: borderless at the panel's own size means no display mode change
+            // and no external scaler, which is the entire point. The bool overload maps to this anyway.
+            Screen.SetResolution(w, h, FullScreenMode.FullScreenWindow);
+        }
+
+        public void Update()
+        {
+            try { UpdateInner(); }
+            catch (Exception e)
+            {
+                if (!loggedUpdateFailure)
+                {
+                    loggedUpdateFailure = true;
+                    Log.LogError("Update failed (logged once): " + e);
+                }
+            }
+        }
+
+        private void UpdateInner()
+        {
+            // 0. Re-fit the picture. Idempotent and allocation-free, and it must run every frame because
+            //    the backbuffer can change under us at any time (alt-tab, a display hot-plug, the user
+            //    dragging the window to a differently-shaped monitor, or one of the four vanilla
+            //    Screen.SetResolution sites we do not hook). It also refreshes the cached picture
+            //    rectangle that the Futile.mousePosition patch divides by.
+            //    Isolated: a presentation failure must not take the backbuffer state machine with it.
+            try { Presentation.Apply(); }
+            catch (Exception e)
+            {
+                if (!loggedPresentationFailure)
+                {
+                    loggedPresentationFailure = true;
+                    Log.LogError("Presentation.Apply failed (logged once): " + e);
+                }
+            }
+
+            // 1. Verify an in-flight request every frame. Screen.SetResolution is a request with no
+            //    failure signal; without this the plugin would re-issue it forever if it never lands,
+            //    recreating the swapchain twice a second.
+            if (pendingW != 0)
+            {
+                if (Screen.width == pendingW && Screen.height == pendingH)
+                {
+                    confirmedW = pendingW; confirmedH = pendingH;
+                    Log.LogInfo($"backbuffer: CONFIRMED {Screen.width}x{Screen.height} "
+                                + $"mode={Screen.fullScreenMode} after {VerifyFrames - pendingFrames} frames");
+                    pendingW = 0; attempts = 0;
+                    // The correct filter mode depends on the RT-vs-backbuffer ratio, and the backbuffer
+                    // has only just settled - the lifecycle hooks ran with a stale Screen.width.
+                    ApplyFilterMode(Futile.screen);
+                }
+                else if (--pendingFrames <= 0)
+                {
+                    Log.LogWarning($"backbuffer: SetResolution({pendingW}x{pendingH}) did not take effect "
+                                   + $"within {VerifyFrames} frames - still {Screen.width}x{Screen.height}. "
+                                   + (attempts >= MaxAttempts
+                                        ? "Giving up. Set TargetWidth/TargetHeight in the config, or the "
+                                          + "display refused the mode."
+                                        : "Will retry."));
+                    pendingW = 0;
+                }
+                return;
+            }
+
+            if (++frameCounter < 30) return;
+            frameCounter = 0;
+
+            // 2. Throttled re-assert. Four of the five vanilla Screen.SetResolution sites are not hooked
+            //    (Menu/OptionsMenu.cs:1088, 1101, 1105 and Options.cs:1115), so this is their recovery.
+            if (!cfgNativeBackbuffer.Value) return;
+
+            // Gate on the game's intent AND on the live state agreeing with it. Firing while the game is
+            // deliberately dropping to windowed (OptionsMenu.cs:1088-1089) would yank the user back into
+            // fullscreen and start a fight with the wrongFullscreenSetting watchdog.
+            if (!WantsFullscreen() || !Screen.fullScreen) return;
+
+            int w, h;
+            if (!ResolveTarget(out w, out h)) return;
+
+            if (Screen.width == w && Screen.height == h)
+            {
+                attempts = 0;
+                confirmedW = w; confirmedH = h;
+                return;
+            }
+
+            // Distinguish "the game clobbered a size we had already achieved" (a fresh cause: reset the
+            // attempt budget) from "our request never landed" (keep counting down towards giving up).
+            if (confirmedW == w && confirmedH == h)
+            {
+                attempts = 0;
+                confirmedW = -1; confirmedH = -1;
+            }
+
+            // Note the comparison is != , not < : an explicitly configured target smaller than the
+            // current backbuffer must also be honoured.
+            RequestBackbuffer(w, h, "poll", false);
+        }
+    }
+}

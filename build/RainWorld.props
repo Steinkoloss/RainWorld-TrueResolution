@@ -1,0 +1,98 @@
+<!--
+  Candidate locations for a Rain World installation. No detection happens here:
+  MSBuild cannot iterate at evaluation time, so the Exists() filtering lives in
+  LocateRainWorld in build/RainWorld.targets, which also declares the three
+  <Reference> items that depend on the result.
+
+  Nothing here is ever redistributed. It only points the compiler at a copy of
+  the game the user already owns.
+
+  Resolution order, first hit wins:
+    1. -p:RainWorldDir=...        explicit, always wins
+    2. $(RW_DIR)                  env var; install.sh / install.ps1 set this
+    3. $(RAINWORLD_DIR)           alias
+    4. $(RW_REFS_DIR) or ./refs   a generated reference root (tools/make-refs.sh)
+    5. every Steam library listed in libraryfolders.vdf, on every drive
+    6. common non-Steam locations (GOG, Epic, manual)
+-->
+<Project>
+
+  <PropertyGroup>
+    <RainWorldDir Condition="'$(RainWorldDir)' == '' And '$(RW_DIR)' != ''">$(RW_DIR)</RainWorldDir>
+    <RainWorldDir Condition="'$(RainWorldDir)' == '' And '$(RAINWORLD_DIR)' != ''">$(RAINWORLD_DIR)</RainWorldDir>
+
+    <!-- A reference root mirrors the game's folder layout but contains only
+         stripped reference assemblies, so pointing RainWorldDir at one needs no
+         other change anywhere. This is how CI builds with no game installed. -->
+    <RainWorldDir Condition="'$(RainWorldDir)' == '' And '$(RW_REFS_DIR)' != ''">$(RW_REFS_DIR)</RainWorldDir>
+    <RainWorldDir Condition="'$(RainWorldDir)' == '' And Exists('$(MSBuildThisFileDirectory)../refs/RainWorld_Data/Managed/Assembly-CSharp.dll')">$(MSBuildThisFileDirectory)../refs</RainWorldDir>
+
+    <_RwHome>$([System.Environment]::GetFolderPath(SpecialFolder.UserProfile))</_RwHome>
+    <_RwWin>$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::Windows)))</_RwWin>
+    <_RwMac>$([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform($([System.Runtime.InteropServices.OSPlatform]::OSX)))</_RwMac>
+  </PropertyGroup>
+
+  <!-- ============================================================ Steam roots
+       Steam records every library folder, including ones on other drives, in
+       steamapps/libraryfolders.vdf (older clients: config/libraryfolders.vdf)
+       under its own root. LocateRainWorld reads each of these and unions the
+       "path" values, so a game on D:\ or on an SD card is found without the
+       user configuring anything. -->
+  <ItemGroup>
+    <!-- Linux -->
+    <RwSteamRoot Include="$(_RwHome)/.local/share/Steam" />
+    <RwSteamRoot Include="$(_RwHome)/.steam/steam" />
+    <RwSteamRoot Include="$(_RwHome)/.steam/root" />
+    <RwSteamRoot Include="$(_RwHome)/.steam/debian-installation" />
+    <RwSteamRoot Include="$(_RwHome)/.var/app/com.valvesoftware.Steam/.local/share/Steam" />
+    <RwSteamRoot Include="$(_RwHome)/snap/steam/common/.local/share/Steam" />
+    <!-- Steam Deck: the internal drive uses the normal path under /home/deck,
+         and the SD card is mounted as its own library root. -->
+    <RwSteamRoot Include="/home/deck/.local/share/Steam" />
+    <RwSteamRoot Include="/run/media/mmcblk0p1" />
+    <!-- macOS -->
+    <RwSteamRoot Include="$(_RwHome)/Library/Application Support/Steam" Condition="'$(_RwMac)' == 'true'" />
+    <!-- Windows. $(Registry:...) is authoritative but only resolves on Windows
+         MSBuild; elsewhere it expands to empty and the Condition drops it. -->
+    <RwSteamRoot Include="$(Registry:HKEY_CURRENT_USER\Software\Valve\Steam@SteamPath)"
+                 Condition="'$(_RwWin)' == 'true' And '$(Registry:HKEY_CURRENT_USER\Software\Valve\Steam@SteamPath)' != ''" />
+    <RwSteamRoot Include="$(Registry:HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Valve\Steam@InstallPath)"
+                 Condition="'$(_RwWin)' == 'true' And '$(Registry:HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Valve\Steam@InstallPath)' != ''" />
+    <RwSteamRoot Include="$(ProgramFiles) (x86)\Steam" Condition="'$(_RwWin)' == 'true'" />
+    <RwSteamRoot Include="$(ProgramFiles)\Steam"       Condition="'$(_RwWin)' == 'true'" />
+    <RwSteamRoot Include="C:\Steam"                    Condition="'$(_RwWin)' == 'true'" />
+    <RwSteamRoot Include="D:\Steam"                    Condition="'$(_RwWin)' == 'true'" />
+  </ItemGroup>
+
+  <!-- ========================================================= non-Steam -->
+  <ItemGroup>
+    <RwFixedCandidate Include="$(_RwHome)/GOG Games/Rain World" />
+    <RwFixedCandidate Include="$(_RwHome)/Games/Rain World" />
+    <RwFixedCandidate Include="/opt/Rain World" />
+    <RwFixedCandidate Include="C:\GOG Games\Rain World"          Condition="'$(_RwWin)' == 'true'" />
+    <RwFixedCandidate Include="$(ProgramFiles)\Epic Games\RainWorld" Condition="'$(_RwWin)' == 'true'" />
+    <RwFixedCandidate Include="C:\Program Files\Epic Games\RainWorld" Condition="'$(_RwWin)' == 'true'" />
+  </ItemGroup>
+
+  <!-- ==================================================== game-only references
+       The three assemblies with no NuGet package on any feed. Everything else
+       the plugin compiles against comes from a pinned package (see the csproj),
+       so this is the entire surface that requires a game install.
+
+       Add a line here rather than a <Reference> in the csproj: LocateRainWorld
+       expands these after $(ManagedDir) is known, which a csproj-level HintPath
+       cannot wait for.
+
+         Dir=Managed         -> RainWorld_Data/Managed/<Include>.dll
+         Dir=BepInExPlugins  -> BepInEx/plugins/<Include>.dll
+         Dir=BepInExCore     -> BepInEx/core/<Include>.dll -->
+  <ItemGroup>
+    <RwGameReference Include="Assembly-CSharp"       Dir="Managed" />
+    <RwGameReference Include="HOOKS-Assembly-CSharp" Dir="BepInExPlugins" />
+    <!-- RawImage / CanvasScaler. uGUI ships as a Unity package rather than a
+         core module, so it is absent from UnityEngine.Modules and has no
+         NuGet mirror anywhere. -->
+    <RwGameReference Include="UnityEngine.UI"        Dir="Managed" />
+  </ItemGroup>
+
+</Project>

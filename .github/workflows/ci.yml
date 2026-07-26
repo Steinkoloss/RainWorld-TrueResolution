@@ -1,0 +1,206 @@
+name: CI
+
+# Rain World mods cannot be built by a naive CI job: three of the assemblies
+# this plugin compiles against ship with the game and are not redistributable,
+# so a public runner has nothing to compile against. This workflow is therefore
+# split into what can always run and what needs credentials.
+#
+#   metadata  - always runs, including on pull requests from forks. Needs no
+#               game files at all. Catches the errors that actually happen:
+#               a broken modinfo.json, a drifted version string, a thumbnail
+#               the in-game Workshop uploader will reject.
+#
+#   compile   - only runs when RW_REFS_REPO / RW_REFS_TOKEN are configured.
+#               Pulls reference assemblies from a PRIVATE repository generated
+#               by tools/make-refs.sh, then does a real build. Skips cleanly
+#               (not fails) when those secrets are absent, which is always the
+#               case for a fork PR, because GitHub does not expose secrets to
+#               forked workflow runs.
+#
+# See docs/RELEASING.md for the one-time private-refs setup, and for why the
+# reference assemblies are not simply committed here.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    name: metadata and layout
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate modinfo.json, version agreement, thumbnail, mod layout
+        run: python3 tools/check-metadata.py
+
+      - name: Assert no game assemblies were committed
+        # A committed Assembly-CSharp.dll or HOOKS-Assembly-CSharp.dll is a
+        # redistribution of Videocult's code and a takedown risk. .gitignore
+        # covers the known names; this catches a -f add or a rename.
+        run: |
+          set -euo pipefail
+          bad=$(git ls-files -z \
+            | tr '\0' '\n' \
+            | grep -Ei '(^|/)(Assembly-CSharp(-firstpass)?|HOOKS-Assembly-CSharp|PUBLIC-Assembly-CSharp|UnityEngine[^/]*|UnityPlayer|BepInEx|0Harmony)\.dll$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::These are game or engine assemblies and must not be in the repository:"
+            printf '  %s\n' $bad
+            exit 1
+          fi
+          # Anything large is suspicious for a repo whose only artifact is a 30 KB DLL.
+          git ls-files -z | tr '\0' '\n' | while IFS= read -r f; do
+            [ -f "$f" ] || continue
+            sz=$(wc -c < "$f")
+            if [ "$sz" -gt 2000000 ]; then
+              echo "::error::$f is $sz bytes. Nothing in this repo should be that large."
+              exit 1
+            fi
+          done
+          echo "no game assemblies committed"
+
+      - name: Assert the public dependency graph still resolves
+        # This is the half of the build that needs no game: if the BepInEx feed
+        # drops UnityEngine.Modules 2020.3.45 or BepInEx.Core 5.4.17, every
+        # contributor's build breaks and we want to know from CI, not from a
+        # bug report. Restore alone does not touch the game references.
+        run: dotnet restore
+
+      - name: Check install.sh
+        run: |
+          bash -n install.sh
+          bash -n tools/make-refs.sh
+          bash -n tools/release.sh
+          if command -v shellcheck >/dev/null; then
+            shellcheck -S warning install.sh tools/make-refs.sh tools/release.sh
+          fi
+
+  windows-installer:
+    name: Windows installer script
+    runs-on: windows-latest
+    # install.ps1 is the path most users take and it cannot be exercised on a
+    # Linux dev machine, so CI is the only place it ever gets checked.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse install.ps1
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./install.ps1), [ref]$null, [ref]$errors) | Out-Null
+          if ($errors) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }
+          Write-Host 'install.ps1 parses'
+
+      - name: Static analysis
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -SkipPublisherCheck
+          $r = Invoke-ScriptAnalyzer -Path ./install.ps1 -Severity Error,Warning
+          $r | Format-Table -AutoSize
+          if ($r | Where-Object Severity -eq 'Error') { exit 1 }
+
+      - name: Detection must fail cleanly when the game is absent
+        # The runner has no Rain World, so this exercises the not-found branch:
+        # it must print guidance and exit 1, not throw a PowerShell exception.
+        shell: pwsh
+        run: |
+          $out = & pwsh -NoProfile -File ./install.ps1 2>&1
+          $code = $LASTEXITCODE
+          $out | Write-Host
+          if ($code -ne 1) { Write-Error "expected exit 1, got $code"; exit 1 }
+          if ($out -notmatch 'Could not find Rain World') {
+            Write-Error 'missing the actionable not-found message'; exit 1
+          }
+          Write-Host 'not-found path behaves'
+
+      - name: Install into a fake game tree
+        # Proves the copy layout and the enabledMods.txt handling without a game.
+        shell: pwsh
+        run: |
+          $fake = Join-Path $env:RUNNER_TEMP 'RainWorld'
+          New-Item -ItemType Directory -Force "$fake\RainWorld_Data\Managed" | Out-Null
+          New-Item -ItemType Directory -Force "$fake\RainWorld_Data\StreamingAssets\mods" | Out-Null
+          # Detection only probes for this file's existence.
+          Set-Content "$fake\RainWorld_Data\Managed\Assembly-CSharp.dll" 'not a real assembly'
+          # Pre-stage what a build would have produced.
+          New-Item -ItemType Directory -Force 'bin\mod\trueresolution\plugins' | Out-Null
+          Copy-Item mod\modinfo.json 'bin\mod\trueresolution\modinfo.json'
+          Set-Content 'bin\mod\trueresolution\plugins\TrueResolution.dll' 'stub'
+
+          & pwsh -NoProfile -File ./install.ps1 -RainWorldDir $fake -NoBuild
+          if ($LASTEXITCODE -ne 0) { Write-Error 'install.ps1 failed'; exit 1 }
+
+          $dest = "$fake\RainWorld_Data\StreamingAssets\mods\trueresolution"
+          foreach ($f in @("$dest\modinfo.json", "$dest\plugins\TrueResolution.dll")) {
+            if (-not (Test-Path $f)) { Write-Error "missing $f"; exit 1 }
+          }
+          Write-Host 'install.ps1 produced the correct layout'
+
+  compile:
+    name: compile against private reference assemblies
+    runs-on: ubuntu-latest
+    # Fork PRs get no secrets, so this would fail for reasons the contributor
+    # cannot fix. Gate on the repo identity instead of trying to read a secret.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check whether private refs are configured
+        id: cfg
+        env:
+          REFS_REPO: ${{ secrets.RW_REFS_REPO }}
+          REFS_TOKEN: ${{ secrets.RW_REFS_TOKEN }}
+        run: |
+          if [ -n "$REFS_REPO" ] && [ -n "$REFS_TOKEN" ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::RW_REFS_REPO / RW_REFS_TOKEN are not set, so there is nothing to compile against. Metadata checks still ran. See docs/RELEASING.md to enable compiling in CI, or build locally with ./install.sh."
+          fi
+
+      - name: Fetch reference assemblies from the private repo
+        if: steps.cfg.outputs.have == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.RW_REFS_REPO }}
+          token: ${{ secrets.RW_REFS_TOKEN }}
+          path: refs-src
+
+      - name: Stage refs/
+        if: steps.cfg.outputs.have == 'true'
+        run: |
+          set -euo pipefail
+          # The private repo is expected to contain the refs/ tree that
+          # tools/make-refs.sh produces, either at its root or under refs/.
+          if [ -d refs-src/refs ]; then mv refs-src/refs refs; else mv refs-src refs; fi
+          test -f refs/RainWorld_Data/Managed/Assembly-CSharp.dll
+          test -f refs/RainWorld_Data/Managed/UnityEngine.UI.dll
+          test -f refs/BepInEx/plugins/HOOKS-Assembly-CSharp.dll
+          cat refs/GAME_VERSION.txt 2>/dev/null || true
+
+      - uses: actions/setup-dotnet@v4
+        if: steps.cfg.outputs.have == 'true'
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build
+        if: steps.cfg.outputs.have == 'true'
+        # -warnaserror because the whole point of compiling in CI is to catch
+        # what a local build lets you ignore.
+        run: dotnet build -c Release -warnaserror -p:RainWorldDir=refs
+
+      - name: Upload the staged mod folder
+        if: steps.cfg.outputs.have == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: trueresolution-mod-folder
+          # Contents of bin/mod/, i.e. a trueresolution/ folder ready to drop
+          # into RainWorld_Data/StreamingAssets/mods/.
+          path: bin/mod/
+          if-no-files-found: error

@@ -1,0 +1,63 @@
+name: Mod or hardware compatibility report
+description: Works, or does not, with a particular mod / display / GPU
+labels: [compatibility]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Positive reports are useful too — the mod has only been verified on one
+        machine (2560x1440, 16:9, D3D11, AMD, Proton), which is the easy case.
+        Ultrawide, multi-monitor, 4:3, HiDPI macOS and OpenGL are all unverified.
+
+  - type: input
+    id: other
+    attributes:
+      label: Other mod (id and Workshop link), or "none — hardware report"
+      placeholder: "pjb3005.sharpener — https://steamcommunity.com/sharedfiles/filedetails/?id=2920451662"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Works fine together
+        - Visual glitch
+        - One mod's effect is cancelled
+        - Crash or hard failure
+    validations:
+      required: true
+
+  - type: input
+    id: display
+    attributes:
+      label: Display resolution, aspect and scaling
+      placeholder: "5120x1440 (32:9), no OS scaling"
+    validations:
+      required: true
+
+  - type: input
+    id: gfx
+    attributes:
+      label: Graphics API and GPU
+      description: |
+        The `gfx:` line in the BepInEx log has both, e.g.
+        `gfx: 'Direct3D11 …' device='AMD Radeon …'`. The OpenGL path is a
+        separate code branch in the game and is completely untested here.
+      placeholder: "Direct3D11, NVIDIA RTX 3070"
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Relevant BepInEx log lines
+      render: text
+
+  - type: textarea
+    id: detail
+    attributes:
+      label: Details
+    validations:
+      required: true

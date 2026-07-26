@@ -1,0 +1,81 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Candidate game locations and the game-only reference list.
+       Override the detection with -p:RainWorldDir=... or the RW_DIR env var. -->
+  <Import Project="build/RainWorld.props" />
+
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>TrueResolution</AssemblyName>
+    <RootNamespace>TrueResolution</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <!-- Game/Unity DLLs are provided by the running game; never copy them next to our plugin. -->
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <DebugType>portable</DebugType>
+    <AssemblySearchPaths>$(AssemblySearchPaths);{RawFileName}</AssemblySearchPaths>
+    <IsPackable>false</IsPackable>
+    <!-- Release DLLs from two machines should be byte-comparable. -->
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <!-- ================================================================ identity
+       mod/modinfo.json is the single source of truth for the version, because
+       that is the one copy Remix and the Steam Workshop actually display.
+       $(Version) is read out of it so the assembly version cannot drift, and
+       tools/check-metadata.py asserts that src/Plugin.cs and CHANGELOG.md agree. -->
+  <PropertyGroup>
+    <ModId>trueresolution</ModId>
+    <ModZipName>RainWorld-TrueResolution</ModZipName>
+    <_ModInfoText>$([System.IO.File]::ReadAllText('$(MSBuildThisFileDirectory)mod/modinfo.json'))</_ModInfoText>
+    <Version>$([System.Text.RegularExpressions.Regex]::Match($(_ModInfoText), '&quot;version&quot;\s*:\s*&quot;([^&quot;]+)&quot;').Groups.get_Item(1).Value)</Version>
+    <ModStageDir>$(MSBuildThisFileDirectory)bin/mod/$(ModId)/</ModStageDir>
+    <Authors>Steinkoloss</Authors>
+    <Product>True Resolution</Product>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="src/**/*.cs" />
+    <!-- Copied verbatim into the root of the staged mod folder. -->
+    <ModContent Include="mod/**/*" />
+    <None Include="mod/**/*;build/**/*;tools/**/*;.github/**/*;*.md" />
+  </ItemGroup>
+
+  <!-- ============================================================== packages
+       Every reference that has a package comes from a package, pinned to the
+       exact version Rain World v1.11.8 ships. This is what makes a CI build
+       possible: it shrinks the set of assemblies that must come out of a game
+       install from nine to three.
+
+         BepInEx.Core        5.4.17     -> BepInEx.dll        game: 5.4.17.0    MIT
+         HarmonyX            2.5.5      -> 0Harmony.dll       game: 2.5.5.0     MIT
+         UnityEngine.Modules 2020.3.45  -> UnityEngine.dll, UnityEngine.CoreModule.dll,
+                                           UnityEngine.UIModule.dll,
+                                           UnityEngine.InputLegacyModule.dll
+                                        game: Unity 2020.3.45f1
+
+       HarmonyX is pinned explicitly because BepInEx.Core pulls 2.7.0 in
+       transitively and a direct reference has to win. The game loads
+       0Harmony 2.5.5.0; compiling against a newer surface would push a
+       MissingMethodException out to runtime, which is exactly the class of bug
+       that only shows up on a user's machine.
+
+       UnityEngine.Modules needs the BepInEx feed, see NuGet.Config: nuget.org
+       only carries 2021.3.33 of that package id. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <PackageReference Include="BepInEx.Core" Version="5.4.17" PrivateAssets="all" />
+    <PackageReference Include="HarmonyX" Version="2.5.5" PrivateAssets="all" />
+    <PackageReference Include="UnityEngine.Modules" Version="2020.3.45" IncludeAssets="compile" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- Assembly-CSharp, HOOKS-Assembly-CSharp and UnityEngine.UI have no package
+       on any feed. They are declared as @(RwGameReference) in RainWorld.props
+       and turned into <Reference> items by LocateRainWorld below, which has to
+       resolve $(ManagedDir) first - something a csproj-level HintPath cannot
+       wait for. Also defines StageModFolder and PackageMod. -->
+  <Import Project="build/RainWorld.targets" />
+
+</Project>
