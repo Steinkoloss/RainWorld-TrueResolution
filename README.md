@@ -145,7 +145,8 @@ oversight. See [what is not done](#what-is-explicitly-not-done).
 
 The common case, and the one this helps most. You get a native 1920×1080
 backbuffer instead of a 1366×768 one stretched up by your monitor, plus a
-2× supersampled render texture. Expect a clearly crisper image.
+2× supersampled render texture (what Auto picks there). Expect a clearly
+crisper image.
 
 ### Ultrawide and other non-16:9 displays (3440×1440, 5120×1440, 4:3, 16:10)
 
@@ -157,8 +158,9 @@ black bars on the left and right (`AspectMode = Letterbox`, the default).
 **You will have black bars on an ultrawide, and that is correct.** The
 alternative is not "more game on screen" — it is the same picture stretched
 horizontally, because Rain World's camera image is a full-stretch overlay and
-nothing widens the actual view. If you would rather have the stretch, set
-`AspectMode = Off` to get vanilla behaviour on that axis.
+nothing widens the actual view. If you would rather have the stretch, tick
+**Stretch to fill screen** on the mod's Remix page (the option only appears on
+non-16:9 displays).
 
 This is the **least-verified** part of the mod. It has been tested on 2560×1440
 (16:9). If you have an ultrawide, a 4:3 panel, or multiple monitors, a
@@ -228,27 +230,29 @@ This mod never writes `FScreen.pixelWidth`, `FScreen.pixelHeight`,
 
 ## Performance
 
-**Short version: if in doubt, leave `Supersample` at 2. If your GPU is old or
-your screen is large, set it to 1 — you keep the bigger half of the benefit for
-free.**
+**Short version: you do not need to configure anything.** The default
+(`Render quality = Auto`) picks the cheapest clean setting for your display.
+If a heavy rain room ever dips on old hardware, set `Render quality = 1` —
+you keep the native backbuffer, which is the bigger half of the benefit,
+for free.
 
 The two halves of this mod cost wildly different amounts:
 
-- **`NativeBackbuffer` is nearly free.** It presents at your real resolution
+- **The native backbuffer is nearly free.** It presents at your real resolution
   instead of letting the game shrink the window. No extra rendering, and it is
-  the single biggest visual improvement. There is no reason to turn it off.
-- **`Supersample` is the expensive half**, and its cost scales with the *square*
-  of the value.
+  the single biggest visual improvement.
+- **Render quality is the expensive half**, and its cost scales with the
+  *square* of the value.
 
 What you are actually rendering, on a 1366×768 logical screen:
 
-| Supersample | Render target | Megapixels | Target VRAM (with mips) |
+| Render quality | Render target | Megapixels | Target VRAM |
 |---|---|---|---|
-| 1 | 1366×768 | 1.0 | ~6 MB |
-| 2 (default) | 2732×1536 | 4.2 | ~22 MB |
-| 3 | 4098×2304 | 9.4 | ~50 MB |
-| 4 | 5464×3072 | 16.8 | ~89 MB |
-| 8 | 10928×6144 | 67.1 | ~357 MB |
+| 1 | 1366×768 | 1.0 | ~4 MB |
+| 2 (= Auto on 1080p/1440p) | 2732×1536 | 4.2 | ~17 MB |
+| 3 (= Auto on 4K) | 4098×2304 | 9.4 | ~38 MB |
+| 4 | 5464×3072 | 16.8 | ~67 MB |
+| 8 | 10928×6144 | 67.1 | ~268 MB |
 
 **Higher values keep helping, and it is worth understanding why**, because it is
 not "more texture detail" — the room artwork really is a fixed 1400×800 image.
@@ -265,13 +269,12 @@ the level graphic sits at fractional camera coordinates, so at 1x every edge sna
 to a whole pixel, while at 8x it resolves to an eighth of one. Edges land where
 they belong and stop crawling as the camera pans.
 
-So with **Smooth scaling off** (the default), raise this until the framerate stops
-being comfortable. With smoothing **on**, the returns fade much sooner, because
-filtering averages that precision back out.
+So if you want more than Auto, raise the value until the framerate stops being
+comfortable — the returns are real but they shrink each step.
 
 ### Will it run on my GPU?
 
-Measured: an RX 9070 XT holds a 360 Hz refresh cap in-game at `Supersample = 4`,
+Measured: an RX 9070 XT holds a 360 Hz refresh cap in-game at `Render quality = 4`,
 so it was never the bottleneck. Everything below that is **estimated from memory
 bandwidth**, which is the right proxy because the cost here is dominated by
 Rain World's grab passes — the shader library declares 112 of them, 81 unnamed,
@@ -281,9 +284,9 @@ swings a lot between a bare corridor and a rain-soaked, water-filled room.
 
 | Tier | Suggested setting |
 |---|---|
-| Modern mid-range and up (RX 6700 XT / RTX 3060 and better) | `2`, or `3–4` at 1080p if you want to experiment |
-| Budget/older (RX 6500 XT, RTX 3050, GTX 1650) at 1080p | `2` should be comfortable; drop to `1` if a heavy rain room dips |
-| 4 GB cards at 1440p or 4K | `2` is still fine. The limit here is fill rate, not memory — even at `8` the render target is only ~360 MB |
+| Modern mid-range and up (RX 6700 XT / RTX 3060 and better) | Auto, or `3–4` if you want to experiment |
+| Budget/older (RX 6500 XT, RTX 3050, GTX 1650) at 1080p | Auto should be comfortable; drop to `1` if a heavy rain room dips |
+| 4 GB cards at 1440p or 4K | Auto is still fine. The limit is fill rate, not memory — even at `8` the render target is only ~270 MB |
 | Integrated graphics / Steam Deck | `1`. The native backbuffer still helps and costs nothing |
 
 If you are chasing a number, note that **frames per second will not tell you the
@@ -298,21 +301,22 @@ frame time instead.
 If the file is not there, the plugin never loaded — see
 [troubleshooting](#troubleshooting).
 
+The normal way to change settings is in game: main menu → **Remix** →
+**True Resolution** → the cog icon. There is one slider (**Render quality**,
+default Auto) and, on non-16:9 displays only, a **Stretch to fill screen**
+tick box. Changes apply immediately.
+
+The config file holds the same values plus troubleshooting overrides:
+
 | Key | Default | Meaning |
 |---|---|---|
-| `Supersample` | `2` | Internal render scale, 1–4. `2` is the sweet spot. Cost scales with the **square** of this — Rain World is fill-bound and uses 100+ GrabPasses. |
-| `NativeBackbuffer` | `true` | Present at native resolution in fullscreen. Windowed mode is left alone deliberately. |
-| `AspectMode` | `Letterbox` | `Letterbox` fits the ~16:9 picture inside the native backbuffer with bars. `Off` reverts to vanilla full-stretch. `BackbufferAspect` asks Unity for an already-correct backbuffer instead (a fallback; unreliable on some drivers). |
+| `RenderQuality` | `0` | `0` = Auto: the smallest integer scale that covers the picture (2× on 1080p/1440p, 3× on 4K). `1`–`8` force a fixed scale. |
+| `NativeBackbuffer` | `true` | Present at native resolution in fullscreen. Windowed mode is left alone deliberately. Troubleshooting off-switch. |
+| `AspectMode` | `Letterbox` | `Letterbox` fits the ~16:9 picture inside the native backbuffer with bars. `Stretch` reverts to vanilla full-stretch. `AspectBackbuffer` asks Unity for an already-correct backbuffer instead (a fallback; unreliable on some drivers). |
 | `TargetWidth` / `TargetHeight` | `0` | `0` = auto-detect. Set **both** if the log shows the wrong display. |
-| `Downsample` | `Point` | Hard pixel edges by default. `Auto` smooths and picks the best filter for your resolution. |
-| `LegacyScreenOffset` | `false` | Diagnostic A/B for a half-pixel shift. Only touch it if you are chasing one. |
 
-**If the framerate drops, set `Supersample = 1`.** You keep the native-backbuffer
-win, which is the larger of the two improvements anyway.
-
-Editing the file requires a game restart. If you have
-[Remix / CompletelyOptional](https://raindb.net/) installed you may be able to
-change these in-game instead.
+**If the framerate drops, set `Render quality = 1`.** You keep the
+native-backbuffer win, which is the larger of the two improvements anyway.
 
 ---
 
@@ -349,7 +353,7 @@ backbuffer: CONFIRMED 2560x1440 mode=FullScreenWindow after 1 frames
 | `display probe` shows the wrong resolution | Set `TargetWidth` and `TargetHeight` explicitly in the config. |
 | `backbuffer: SetResolution(...) did not take effect` | The display refused the mode. Set `TargetWidth`/`TargetHeight` to a mode your monitor actually has. |
 | Nothing changes, and you are in windowed mode | `NativeBackbuffer` is fullscreen-only by design. Supersampling still applies. |
-| Framerate dropped | `Supersample = 1`. |
+| Framerate dropped | `Render quality = 1`. |
 | Image looks stretched on an ultrawide | Set `AspectMode = Letterbox` (the default). If it is already that, file a compatibility report. |
 
 ---
@@ -383,8 +387,9 @@ should not be run alongside this one:
   are lower-resolution than their surroundings. Not a regression versus vanilla —
   an improvement that did not propagate.
 - `renderScale > 1` activates `FScreen.UpdateScreenOffset`'s non-`1` branch,
-  which is dead code in stock Rain World. It looks correct, but neither setting is
-  "the tested one" — hence `LegacyScreenOffset`.
+  which is dead code in stock Rain World. With integer-multiple render targets —
+  the only kind this mod creates — its constants are exactly correct, and long
+  play sessions at 2×–8× have shown no misalignment.
 
 **Untested territory:** ultrawide and multi-monitor, 4:3 and 16:10 panels, the
 OpenGL rendering path, macOS, and native Linux. The only machine this has been

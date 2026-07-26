@@ -10,6 +10,78 @@ do not.
 csproj reads `$(Version)` out of it, and `tools/check-metadata.py` asserts that
 `src/Plugin.cs` and this file match.
 
+## 1.7.0
+
+Zero-config release: everything important now happens automatically, and the
+development-only knobs from the 1.6.x native-mode investigation are gone.
+
+### Changed
+- **`RenderQuality` replaces `Supersample`, default `0` = automatic**: the
+  smallest integer scale whose render texture covers the *displayed picture* —
+  2× on 1080p and 1440p, 3× on 4K. On ultrawides the fit is computed against the
+  letterboxed picture, not the raw screen, so 3440×1440 correctly picks 2× rather
+  than wasting 2.4× the fill on discarded pixels. The scale re-fits itself if the
+  backbuffer changes mid-session.
+- **The settings page is one slider** (Render quality, default Auto) plus, on
+  non-16:9 displays only, the Stretch tick box. Smooth scaling is gone — Point
+  sampling is correct for this art, and the game's own filter selection already
+  handles the one case (sub-768p displays) where bilinear is right.
+- **Everything is integer-scaled by design.** The display-sized "true native"
+  render texture is deleted rather than optional: pixel-level captures proved the
+  sprites carry a baked one-texel black outline that a non-integer world-to-pixel
+  ratio must render unevenly (Point) or smear into a halo (Bilinear). With
+  integer targets, the game's own filter choice, half-texel offset and camera
+  aspect are exactly correct — so the camera-aspect pin, the generalised screen
+  offset, the render-target swap machinery and the atlas-filter repair are all
+  deleted too. The plugin is roughly half its former size.
+
+### Removed
+- Debug tooling: the Ctrl+Alt alignment-nudge hotkeys, the Ctrl+Alt+P
+  render-texture capture, `AlignX`/`AlignY`, `LegacyScreenOffset`.
+- Config: `Supersample` (renamed), `Downsample`, `SmoothDownsample`,
+  `TrueNativeRT`. Old keys in existing config files are ignored harmlessly.
+- The mip-chain downsampler: it only ever mattered for smooth minification at
+  3×+, which no longer exists as a shipped mode.
+
+## 1.6.2
+
+### Fixed
+- **The one-pixel dark seam in Native mode, properly this time.** It flips side
+  across the middle of the screen — left of a sprite in the left half, right of it
+  in the right half — which rules out a constant offset and means a *scale* error.
+  Futile never assigns `camera.aspect`, so Unity derives it from the render
+  target. In Native mode that is the display, so on 2560x1440 with a 1366x768
+  logical screen the camera renders `768 * (2560/1440)` = 1365.33 world units of
+  width while every screen-space shader is told `_screenSize.x = 1366`. The 0.049%
+  difference is nothing as framing, but as a scale error it drifts sprite geometry
+  against the screen-space textures those sprites sample by up to ±0.62 render
+  pixels — zero at centre, opposite directions on the two halves.
+  `camera.aspect` is now pinned to the logical aspect whenever the target is not an
+  exact integer multiple, so the camera renders exactly `pixelWidth x pixelHeight`
+  world units and registration is exact everywhere. Render pixels become 0.049%
+  non-square, which is uniform, invisible, and cannot produce an edge.
+  The 1.6.0 changelog called that 0.05% "negligible" — negligible as framing, not
+  as registration.
+
+## 1.6.1
+
+### Fixed
+- **One-pixel dark seam along one edge of sprites in Native mode.**
+  `FScreen.UpdateScreenOffset` assumes the render texture is exactly
+  `pixelWidth/Height * renderScale`, and its `renderScale != 1` branch shifts the
+  camera a whole world unit while handing shaders a half-texel of
+  `0.5/pixelWidth`. A native 2560x1440 target against a 1366x768 logical screen
+  has 1.875 render pixels per world unit, so that correction was ~1.875x too
+  large: screen-space sampling landed about a pixel off and left a seam on
+  whichever side the offset pushed toward.
+  Alignment is now derived from the real target size whenever it is not an exact
+  integer multiple of the logical screen, using the shipped `renderScale == 1`
+  semantics generalised to any size (shift by half a *render texture* pixel, no
+  shader-side correction). It reduces exactly to vanilla when the two match.
+  The integer path is untouched — it is visually verified and worth no risk.
+  Note the branch this replaces is dead code in stock Rain World, so it had never
+  been exercised by anyone.
+
 ## 1.6.0
 
 ### Added

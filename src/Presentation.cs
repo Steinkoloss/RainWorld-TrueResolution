@@ -6,22 +6,6 @@ using UnityEngine.UI;
 
 namespace TrueResolution
 {
-    /// <summary>Filter used to bring the supersampled render texture down to the backbuffer.</summary>
-    internal enum DownsampleMode
-    {
-        /// <summary>MipmapBox while minifying, Bilinear otherwise. Recommended.</summary>
-        Auto = 0,
-
-        /// <summary>Mip chain + trilinear: a box-filtered pyramid. Best available without a shader.</summary>
-        MipmapBox = 1,
-
-        /// <summary>A single 4-tap bilinear sample.</summary>
-        Bilinear = 2,
-
-        /// <summary>Nearest neighbour.</summary>
-        Point = 3
-    }
-
     /// <summary>How the (at most 1366x768, ~16:9) logical picture is fitted into the backbuffer.</summary>
     internal enum AspectMode
     {
@@ -185,18 +169,6 @@ namespace TrueResolution
             lastBackbufferW = lastBackbufferH = 0;
 
             Plugin.Log.LogInfo("presentation: restored vanilla full-stretch presentation");
-        }
-
-        /// <summary>
-        /// Repoint the presenting RawImage at a different render texture, used when the render target is
-        /// swapped for a mipmapped one. Presentation owns the RawImage reference, so it owns the rebind.
-        /// A no-op before Futile.Init has produced the RawImage, which is harmless: Futile.Init
-        /// (Futile.cs:222) and UpdateScreenWidth (Futile.cs:283) assign the texture themselves.
-        /// </summary>
-        internal static void RebindTexture(RenderTexture rt)
-        {
-            if (!Resolve()) return;
-            if (image != null) image.texture = rt;
         }
 
         // ------------------------------------------------------------------ resolve
@@ -429,29 +401,6 @@ namespace TrueResolution
             return true;
         }
 
-        /// <summary>Diagnostic: dump the whole presentation chain. Wired to a keybind by the plugin.</summary>
-        internal static void DumpState()
-        {
-            Plugin.Log.LogInfo("---- presentation dump ----");
-            Plugin.Log.LogInfo($"mode={Mode} backbuffer={Screen.width}x{Screen.height} "
-                               + $"fs={Screen.fullScreen} fsMode={Screen.fullScreenMode}");
-            FScreen s = Futile.screen;
-            if (s != null)
-                Plugin.Log.LogInfo($"logical={s.pixelWidth}x{s.pixelHeight} renderScale={s.renderScale} "
-                                   + $"RT={(s.renderTexture != null ? s.renderTexture.width + "x" + s.renderTexture.height : "null")} "
-                                   + $"filter={(s.renderTexture != null ? s.renderTexture.filterMode.ToString() : "?")}");
-            if (imageRT != null)
-            {
-                Plugin.Log.LogInfo($"anchorMin={imageRT.anchorMin} anchorMax={imageRT.anchorMax} "
-                                   + $"sizeDelta={imageRT.sizeDelta} anchoredPos={imageRT.anchoredPosition} "
-                                   + $"rect={imageRT.rect}");
-                Plugin.Log.LogInfo($"uvRect={image.uvRect} irregular={Futile.subjectToAspectRatioIrregularity}");
-                Plugin.Log.LogInfo($"pictureRect(px)={picture} valid={pictureValid} backdrop={(backdrop != null)}");
-                RectTransform parent = imageRT.parent as RectTransform;
-                if (parent != null) Plugin.Log.LogInfo($"parent '{parent.name}' rect={parent.rect}");
-            }
-            else Plugin.Log.LogInfo("camera image not resolved");
-        }
     }
 
     /// <summary>

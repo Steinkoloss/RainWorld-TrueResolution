@@ -28,12 +28,21 @@ namespace TrueResolution
     ///     (pixelWidth * renderScale, pixelHeight * renderScale) but the constructor pins it to 1.
     ///     Crucially the Futile camera's orthographicSize is derived from pixelHeight, NOT from the
     ///     RenderTexture size (Futile.InitCamera / Futile.UpdateCameraPosition), so raising renderScale
-    ///     increases pixel density while showing the exact same slice of the world.
+    ///     increases pixel density while showing the exact same slice of the world. The default is
+    ///     automatic: the smallest integer scale whose render texture covers the displayed picture.
     ///
     ///  2. Native backbuffer. We let the game keep its logical screen (gameplay visibility checks,
     ///     shader globals and room framing all derive from Options.ScreenSize) but present it into a
-    ///     backbuffer at the display's real resolution, so the final composite is one clean filtered
-    ///     scale instead of a hardware stretch of an already-small image.
+    ///     backbuffer at the display's real resolution, so the final composite is one clean scale
+    ///     instead of a hardware stretch of an already-small image.
+    ///
+    /// Everything is integer-scaled BY DESIGN. A display-sized ("true native") render texture was
+    /// implemented and pixel-diagnosed in development: Rain World's sprites carry a baked one-texel
+    /// black outline, and a non-integer world-to-pixel ratio must render that outline unevenly (Point)
+    /// or smear it into a halo (Bilinear). There is no third sampling mode, so non-integer targets are
+    /// gone rather than configurable. With targets integer-sized, the game's own filter selection,
+    /// half-texel offset and camera aspect are all exactly correct, so this plugin no longer overrides
+    /// any of them.
     ///
     /// Invariants this plugin must never break: it never writes FScreen.pixelWidth, FScreen.pixelHeight,
     /// Options.screenResolutions or Options.ScreenSize.
@@ -43,17 +52,15 @@ namespace TrueResolution
     {
         public const string PluginGuid = "steinkoloss.trueresolution";
         public const string PluginName = "True Resolution";
-        public const string PluginVersion = "1.6.0";
+        public const string PluginVersion = "1.7.0";
 
         internal static ManualLogSource Log;
 
-        private ConfigEntry<int> cfgSupersample;
+        private ConfigEntry<int> cfgQuality;
         private ConfigEntry<bool> cfgNativeBackbuffer;
         private ConfigEntry<int> cfgTargetWidth;
         private ConfigEntry<int> cfgTargetHeight;
-        private ConfigEntry<bool> cfgLegacyScreenOffset;
         private ConfigEntry<AspectMode> cfgAspectMode;
-        private ConfigEntry<DownsampleMode> cfgDownsample;
 
         /// <summary>Cached private setter for FScreen.renderScale (auto-property with a private set).</summary>
         private static PropertyInfo renderScaleProp;
@@ -62,20 +69,11 @@ namespace TrueResolution
         /// <summary>Guards the ReinitRenderTexture hook against re-entering itself while we rebuild.</summary>
         private static bool rebuilding;
 
-        private static int DesiredScale = 2;
-        private static bool LegacyScreenOffset;
-        private static DownsampleMode Downsampling = DownsampleMode.Point;
+        /// <summary>0 = automatic (smallest integer scale covering the picture), 1-8 = fixed.</summary>
+        private static int Quality;
 
-        /// <summary>Supersample 0 means "size the render texture to the display exactly".</summary>
-        private static bool NativeRT;
-
-        /// <summary>Setter for FScreen.renderTexture, which is an auto-property with a private set.</summary>
-        private static PropertyInfo renderTextureProp;
-
-        /// <summary>Remembers the requested scale we already warned about, so the log stays readable.</summary>
         private static int loggedClampOf = -1;
         private static int loggedCostOf = -1;
-        private static bool loggedMipDecline;
 
         private bool hooksApplied;
 
@@ -102,32 +100,25 @@ namespace TrueResolution
         private static TrueResolutionOptions optionsUI;
         private static bool optionsRegistered;
 
-        internal static int CurrentSupersample => DesiredScale;
-        internal static bool CurrentNativeBackbuffer => self != null && self.cfgNativeBackbuffer.Value;
-        internal static DownsampleMode CurrentDownsample => Downsampling;
+        internal static int CurrentQuality => Quality;
         internal static AspectMode CurrentAspect => Presentation.Mode;
 
         /// <summary>
         /// Applies a change made in the Remix options page. The BepInEx config file remains the storage,
         /// so everything is written back to it and persisted by BepInEx as usual.
         /// </summary>
-        internal static void ApplyFromOptions(int supersample, bool nativeBackbuffer,
-                                              DownsampleMode ds, AspectMode am)
+        internal static void ApplyFromOptions(int quality, AspectMode am)
         {
             if (self == null) return;
 
-            int newScale = Mathf.Clamp(supersample, 0, 8);
-            bool rebuildNeeded = newScale != DesiredScale || ds != Downsampling;
+            int newQuality = Mathf.Clamp(quality, 0, 8);
+            bool rebuildNeeded = newQuality != Quality;
             bool aspectChanged = am != Presentation.Mode;
 
-            self.cfgSupersample.Value = newScale;
-            self.cfgNativeBackbuffer.Value = nativeBackbuffer;
-            self.cfgDownsample.Value = ds;
+            self.cfgQuality.Value = newQuality;
             self.cfgAspectMode.Value = am;
 
-            DesiredScale = newScale;
-            NativeRT = newScale == 0;
-            Downsampling = ds;
+            Quality = newQuality;
 
             if (aspectChanged)
             {
@@ -145,12 +136,11 @@ namespace TrueResolution
                 // Go through the game's own UpdateScreenWidth rather than ReinitRenderTexture directly:
                 // it is the only path that also rebinds camera.targetTexture and the presenting RawImage,
                 // so shrinking the scale cannot leave them pointing at a released texture.
-                Log.LogInfo($"options: rebuilding render texture for supersample={newScale} downsample={ds}");
+                Log.LogInfo($"options: rebuilding render texture for quality={newQuality}");
                 Futile.instance.UpdateScreenWidth(Futile.screen.pixelWidth);
             }
 
-            // Re-assert the backbuffer; harmless when nothing changed, and picks up NativeBackbuffer
-            // being switched back on.
+            // Re-assert the backbuffer; harmless when nothing changed.
             self.attempts = 0;
             self.pendingW = 0;
             self.frameCounter = 30;
@@ -160,40 +150,27 @@ namespace TrueResolution
         {
             Log = Logger;
 
-            cfgSupersample = Config.Bind(
-                "Rendering", "Supersample", 2,
+            cfgQuality = Config.Bind(
+                "Rendering", "RenderQuality", 0,
                 new ConfigDescription(
-                    "Internal render scale. The game renders the same view at this multiple of its "
-                    + "internal 768-pixel-tall buffer (1024-1366 wide depending on the aspect-ratio "
-                    + "option), then it is scaled down to your screen.\n"
-                    + "0 = Native: size the render texture to your display exactly, for a 1:1 "
-                    + "composite with no resampling at all and a fraction of the cost. Sharpest "
-                    + "possible for the procedurally drawn art; the room artwork is then "
-                    + "magnified by a non-integer factor with hard pixels, which some people "
-                    + "prefer and some do not. Worth A/B-ing against 2 and 4.\n"
-                    + "With Downsample=Point (the default) higher values keep paying off. Room artwork is "
-                    + "a Point-filtered texture, so supersampling magnifies it INSIDE the engine with hard "
-                    + "pixel edges, instead of letting the display stretch a 768-tall image by a "
-                    + "non-integer factor and blur across every texel boundary - which is what vanilla "
-                    + "does and why vanilla looks soft. A denser render also quantises sprite positions "
-                    + "more finely (the level graphic is placed at fractional camera coordinates), so "
-                    + "edges land accurately and stop crawling when the camera pans.\n"
-                    + "With a smoothing filter the returns fade much sooner, because filtering averages "
-                    + "that precision back out.\n"
-                    + "Cost scales with the SQUARE of this value, and how much that hurts is very "
-                    + "room-dependent: the shader library declares 112 GrabPasses, 81 of them unnamed, "
-                    + "and an unnamed grab copies the whole render target once per drawing object - but "
-                    + "only shaders for effects present in the current room ever run. Raise it until the "
-                    + "framerate stops being comfortable.\n"
-                    + "The scale is clamped automatically so the render texture stays within the GPU's "
-                    + "maximum texture size. 1 disables supersampling.",
+                    "How much detail to render, as a multiple of the game's internal 768-tall buffer.\n"
+                    + "0 (default) = automatic: the smallest scale whose render texture covers the "
+                    + "displayed picture - 2x on 1080p and 1440p, 3x on 4K - which is the cheapest "
+                    + "clean setting for any display.\n"
+                    + "1-8 force a fixed scale. Higher values keep paying off with hard pixels: the room "
+                    + "artwork is magnified inside the engine instead of being stretched by the display, "
+                    + "and a denser render places every pixel edge more precisely, so the image is "
+                    + "crisper and steadier as the camera pans. Cost grows with the square of the value "
+                    + "and is very room-dependent; the scale is clamped so the render texture stays "
+                    + "within the GPU's maximum texture size.",
                     new AcceptableValueRange<int>(0, 8)));
 
             cfgNativeBackbuffer = Config.Bind(
                 "Rendering", "NativeBackbuffer", true,
                 "In fullscreen only, present at the display's native resolution instead of letting the "
                 + "game force the window down to its internal buffer size. This is usually the single "
-                + "biggest visual win. Windowed mode is left alone.");
+                + "biggest visual win. Windowed mode is left alone. Troubleshooting switch - there is "
+                + "no good reason to turn this off.");
 
             cfgTargetWidth = Config.Bind(
                 "Rendering", "TargetWidth", 0,
@@ -204,64 +181,30 @@ namespace TrueResolution
                 "Rendering", "TargetHeight", 0,
                 "Fullscreen backbuffer height. 0 = auto-detect the display's native height.");
 
-            cfgDownsample = Config.Bind(
-                "Rendering", "Downsample", DownsampleMode.Point,
-                "Filter used to get the supersampled render texture down to your screen.\n"
-                + "Point (default): nearest neighbour, keeping hard pixel edges. Rain World is pixel art "
-                + "and most people prefer this. It pairs best with a Supersample that lands near your "
-                + "screen's resolution - at 2 on a 1440p screen the render texture is within 7% of the "
-                + "backbuffer, so this is very nearly a 1:1 blit. Much higher values throw most of the "
-                + "extra samples away and will shimmer in motion.\n"
-                + "Auto: MipmapBox once the render texture is at least 1.5x the backbuffer, "
-                + "plain bilinear below that. The threshold exists because mipmapping buys freedom from "
-                + "aliasing and pays in sharpness - near 1:1 that is a net loss, since trilinear blends "
-                + "part of a half-resolution level in to suppress aliasing bilinear was already "
-                + "handling.\n"
-                + "MipmapBox: give the render texture a mip chain and sample it trilinearly. The GPU "
-                + "builds a box-filtered pyramid, so every source pixel contributes instead of just the "
-                + "nearest four. This is the meaningful win at Supersample 3+, where a single bilinear "
-                + "tap undersamples badly and shimmers; at Supersample 2 on a 1440p screen the ratio is "
-                + "only 1.07 so trilinear stays on mip 0 and it changes almost nothing.\n"
-                + "Bilinear: one 4-tap sample, the previous behaviour.\n"
-                + "Point: nearest neighbour. Aliases hard unless the ratio is exactly 1:1 or integer.");
-
-            cfgLegacyScreenOffset = Config.Bind(
-                "Compatibility", "LegacyScreenOffset", false,
-                "Diagnostic A/B switch. Raising renderScale above 1 moves FScreen.UpdateScreenOffset onto "
-                + "a branch that is dead code in stock Rain World and shifts the camera by half a logical "
-                + "unit. Enable this to force the stock renderScale==1 offset instead. Only touch this if "
-                + "you are chasing a half-pixel shift; it is not obviously more correct either way.");
-
             cfgAspectMode = Config.Bind(
                 "Rendering", "AspectMode", AspectMode.Letterbox,
                 "How the game's ~16:9 logical picture is fitted into your display.\n"
-                + "Letterbox (recommended): keep the backbuffer at your panel's native size and draw black "
-                + "bars inside the game. Correct and identical on every platform, driver and graphics API. "
-                + "Required on 21:9 / 32:9 / 4:3 / 16:10 panels, a no-op on 16:9.\n"
-                + "AspectBackbuffer: ask Unity for a backbuffer that already has the logical aspect ratio "
-                + "and let FullScreenMode.FullScreenWindow letterbox it. Documented behaviour, but there "
-                + "are known Unity bugs where it silently stretches instead, and it costs an extra "
-                + "rescale. Only use this if Letterbox misbehaves.\n"
+                + "Letterbox (default): keep the backbuffer at your panel's native size and draw black "
+                + "bars inside the game. Correct and identical on every platform, driver and graphics "
+                + "API. Required on 21:9 / 32:9 / 4:3 / 16:10 panels, a no-op on 16:9.\n"
+                + "AspectBackbuffer: ask Unity for a backbuffer that already has the logical aspect "
+                + "ratio and let FullScreenMode.FullScreenWindow letterbox it. Documented behaviour, "
+                + "but there are known Unity bugs where it silently stretches instead. Only use this "
+                + "if Letterbox misbehaves.\n"
                 + "Stretch: vanilla behaviour. The picture is distorted on any non-16:9 display.");
 
-            DesiredScale = Mathf.Clamp(cfgSupersample.Value, 0, 8);
-            NativeRT = DesiredScale == 0;
-            LegacyScreenOffset = cfgLegacyScreenOffset.Value;
-            Downsampling = cfgDownsample.Value;
+            Quality = Mathf.Clamp(cfgQuality.Value, 0, 8);
             Presentation.Mode = cfgAspectMode.Value;
 
             renderScaleProp = typeof(FScreen).GetProperty(
                 "renderScale", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             renderScaleField = typeof(FScreen).GetField(
                 "<renderScale>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic);
-            renderTextureProp = typeof(FScreen).GetProperty(
-                "renderTexture", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
             self = this;
 
             On.FScreen.ctor += FScreen_ctor;
             On.FScreen.ReinitRenderTexture += FScreen_ReinitRenderTexture;
-            On.FScreen.UpdateScreenOffset += FScreen_UpdateScreenOffset;
             On.Futile.Init += Futile_Init;
             On.Futile.UpdateCameraPosition += Futile_UpdateCameraPosition;
             On.Options.OnLoadFinished += Options_OnLoadFinished;
@@ -271,10 +214,10 @@ namespace TrueResolution
 
             hooksApplied = true;
 
-            Log.LogInfo($"{PluginName} {PluginVersion} loaded. cfg: supersample={DesiredScale} "
+            Log.LogInfo($"{PluginName} {PluginVersion} loaded. cfg: quality={(Quality == 0 ? "auto" : Quality.ToString())} "
                         + $"nativeBackbuffer={cfgNativeBackbuffer.Value} "
                         + $"target={(cfgTargetWidth.Value > 0 ? cfgTargetWidth.Value + "x" + cfgTargetHeight.Value : "auto")} "
-                        + $"downsample={Downsampling} legacyScreenOffset={LegacyScreenOffset}");
+                        + $"aspect={Presentation.Mode}");
             Log.LogInfo($"gfx: '{SystemInfo.graphicsDeviceVersion}' device='{SystemInfo.graphicsDeviceName}' "
                         + $"-> Futile.isOpenGL will be {SystemInfo.graphicsDeviceVersion.Contains("OpenGL")}");
             ProbeNative();
@@ -285,7 +228,6 @@ namespace TrueResolution
             if (!hooksApplied) return;
             On.FScreen.ctor -= FScreen_ctor;
             On.FScreen.ReinitRenderTexture -= FScreen_ReinitRenderTexture;
-            On.FScreen.UpdateScreenOffset -= FScreen_UpdateScreenOffset;
             On.Futile.Init -= Futile_Init;
             On.Futile.UpdateCameraPosition -= Futile_UpdateCameraPosition;
             On.Options.OnLoadFinished -= Options_OnLoadFinished;
@@ -362,44 +304,40 @@ namespace TrueResolution
 
         // ---------------------------------------------------------------- render scale
 
-        private static void SetRenderScale(FScreen self, int scale)
+        /// <summary>
+        /// The automatic scale: the smallest integer multiple of the logical screen that covers the
+        /// PICTURE - the letterboxed area the render actually lands in, not the raw backbuffer. The
+        /// difference matters on ultrawides: on 3440x1440 the picture is ~2561x1440, so the right answer
+        /// is ceil(1440/768) = 2, while raw screen width would say ceil(3440/1366) = 3 and waste ~2.4x
+        /// the fill on pixels that are then thrown away by the downscale.
+        /// </summary>
+        private static int AutoFitScale(FScreen s)
         {
-            // Prefer the real (private) setter so we do not depend on the compiler's backing-field name.
-            MethodInfo setter = renderScaleProp?.GetSetMethod(true);
-            if (setter != null)
+            int pw = Mathf.Max(1, s.pixelWidth), ph = Mathf.Max(1, s.pixelHeight);
+            float sw = Mathf.Max(1, Screen.width), sh = Mathf.Max(1, Screen.height);
+
+            float picW = sw, picH = sh;
+            if (Presentation.Mode == AspectMode.Letterbox)
             {
-                setter.Invoke(self, new object[] { scale });
-                return;
+                float logicalAspect = (float)pw / ph;
+                picW = Mathf.Min(sw, sh * logicalAspect);
+                picH = picW / logicalAspect;
             }
-            if (renderScaleField != null)
-            {
-                renderScaleField.SetValue(self, scale);
-                return;
-            }
-            Log.LogError("Could not set FScreen.renderScale - supersampling disabled.");
+
+            int sx = Mathf.CeilToInt(picW / pw);
+            int sy = Mathf.CeilToInt(picH / ph);
+            return Mathf.Clamp(Mathf.Max(sx, sy), 1, 8);
         }
 
         /// <summary>
-        /// Makes the render texture match <see cref="DesiredScale"/>. Safe to call repeatedly.
-        /// Rebuilding goes through the game's own ReinitRenderTexture so the shader half-texel offset
-        /// (FScreen.UpdateScreenOffset) is recomputed exactly the way the game expects, and so other
-        /// mods' ReinitRenderTexture postfixes still run.
+        /// The scale actually applied: the configured one (or the automatic fit for 0), clamped so the
+        /// render texture stays within <see cref="SystemInfo.maxTextureSize"/> - an oversized Create()
+        /// fails silently and yields a black screen.
         /// </summary>
-        /// <summary>
-        /// The scale we can actually afford to allocate. A 1366x768 logical screen at 8x is 10928x6144,
-        /// which is inside D3D11's 16384 limit but not inside every GPU's, and asking for a render texture
-        /// past <see cref="SystemInfo.maxTextureSize"/> gets you a silently-failed Create() and a black
-        /// screen. Clamp instead, and say so once.
-        /// </summary>
-        private static int EffectiveScale(FScreen self)
+        private static int EffectiveScale(FScreen s)
         {
-            // Native mode does not use an integer multiple at all. Report 2 so FScreen.UpdateScreenOffset
-            // takes its non-1 branch (the sub-texel offset the devs wrote for a non-1:1 target); the real
-            // dimensions come from DesiredRTSize.
-            if (NativeRT) return 2;
-
-            int want = Mathf.Clamp(DesiredScale, 1, 8);
-            int pw = Mathf.Max(1, self.pixelWidth), ph = Mathf.Max(1, self.pixelHeight);
+            int want = Quality == 0 ? AutoFitScale(s) : Mathf.Clamp(Quality, 1, 8);
+            int pw = Mathf.Max(1, s.pixelWidth), ph = Mathf.Max(1, s.pixelHeight);
 
             int maxDim = SystemInfo.maxTextureSize;
             if (maxDim <= 0) maxDim = 8192;                 // unknown driver: assume the D3D10 floor
@@ -409,220 +347,76 @@ namespace TrueResolution
             if (eff != want && loggedClampOf != want)
             {
                 loggedClampOf = want;
-                Log.LogWarning($"Supersample {want} would need a {pw * want}x{ph * want} render texture, "
+                Log.LogWarning($"quality {want} would need a {pw * want}x{ph * want} render texture, "
                                + $"past this GPU's {maxDim}px limit. Clamped to {eff} "
                                + $"({pw * eff}x{ph * eff}).");
             }
 
-            if (eff >= 3 && loggedCostOf != eff)
+            if (eff >= 3 && Quality != 0 && loggedCostOf != eff)
             {
                 loggedCostOf = eff;
                 long px = (long)pw * eff * ph * eff;
-                // Informational, not a warning of doom: the actual hit depends entirely on how many
-                // grab-pass effects the current room uses, and a fast GPU may not notice at all.
-                Log.LogInfo($"Supersample {eff}: {pw * eff}x{ph * eff}, {px / 1000000f:F1} MP/frame "
-                            + $"(~{px * 4L / 1048576L} MB for the target), {eff * eff / 4f:F1}x the fill cost "
-                            + "of the default 2. Cost is room-dependent (unnamed GrabPasses copy the whole "
-                            + "target per drawing object). Note this is already well above your backbuffer, "
-                            + "so the gain is anti-aliasing only - terrain is fixed 1400x800 art.");
+                Log.LogInfo($"quality {eff}: {pw * eff}x{ph * eff}, {px / 1000000f:F1} MP/frame "
+                            + $"(~{px * 4L / 1048576L} MB for the target). Cost is room-dependent "
+                            + "(unnamed GrabPasses copy the whole target per drawing object).");
             }
             return eff;
         }
 
-        private static void EnsureRenderScale(FScreen self)
+        private static void SetRenderScale(FScreen s, int scale)
         {
-            if (self == null || rebuilding) return;
-
-            int target = EffectiveScale(self);
-
-            if (self.renderScale != target)
+            // Prefer the real (private) setter so we do not depend on the compiler's backing-field name.
+            MethodInfo setter = renderScaleProp?.GetSetMethod(true);
+            if (setter != null)
             {
-                SetRenderScale(self, target);
-                if (self.renderScale != target)
-                {
-                    Log.LogError($"renderScale is still {self.renderScale} after trying to set "
-                                 + $"{target} - reflection failed, supersampling is OFF.");
-                    return;
-                }
-
-                rebuilding = true;
-                try
-                {
-                    // Re-run with the current width: this releases the old texture and allocates a new
-                    // one at pixelWidth * renderScale x pixelHeight * renderScale.
-                    self.ReinitRenderTexture(self.pixelWidth);
-                }
-                finally
-                {
-                    rebuilding = false;
-                }
-                Log.LogInfo($"render texture is now {self.pixelWidth * self.renderScale}x"
-                            + $"{self.pixelHeight * self.renderScale} "
-                            + $"(logical {self.pixelWidth}x{self.pixelHeight}, {self.renderScale}x supersampled)");
+                setter.Invoke(s, new object[] { scale });
+                return;
             }
-
-            ConformRenderTexture(self);
-            ApplyFilterMode(self);
+            if (renderScaleField != null)
+            {
+                renderScaleField.SetValue(s, scale);
+                return;
+            }
+            Log.LogError("Could not set FScreen.renderScale - supersampling disabled.");
         }
 
         /// <summary>
-        /// Gives the render texture a mip chain, which is the best downsample available without shipping a
-        /// custom shader (Unity cannot compile ShaderLab at runtime, so a Lanczos/Mitchell kernel would
-        /// need an AssetBundle built in the editor).
-        ///
-        /// The GPU builds a box-filtered pyramid and trilinear sampling blends the two bracketing levels,
-        /// so at large ratios every source pixel contributes instead of only the nearest four. For pure
-        /// minification a box pyramid is close to optimal - Lanczos mainly wins when magnifying.
-        ///
-        /// useMipMap can only be set before the texture is created and the game news up a plain
-        /// RenderTexture, so the only way in is to allocate a replacement and rebind the three things that
-        /// reference it: both Futile cameras' targetTexture and the presenting RawImage.
+        /// Makes renderScale (and thereby the render texture) match the configured quality. Safe to call
+        /// repeatedly. The rebuild goes through the game's own ReinitRenderTexture, so the filter choice
+        /// and the shader half-texel offset are recomputed exactly the way the game expects - with an
+        /// integer-multiple target both are correct as shipped, which is why this plugin overrides
+        /// neither.
         /// </summary>
-        private static void ConformRenderTexture(FScreen self)
+        private static void EnsureRenderScale(FScreen s)
         {
-            RenderTexture rt = self?.renderTexture;
-            if (rt == null || renderTextureProp == null) return;
+            if (s == null || rebuilding) return;
 
-            int wantW, wantH;
-            DesiredRTSize(self, out wantW, out wantH);
+            int target = EffectiveScale(s);
+            if (s.renderScale == target) return;
 
-            float ratio = Mathf.Max((float)wantW / Mathf.Max(1, Screen.width),
-                                    (float)wantH / Mathf.Max(1, Screen.height));
-
-            // Mipmapping buys freedom from aliasing and pays for it in sharpness, and close to 1:1 that
-            // trade is a net loss: trilinear blends log2(ratio) of a HALF-resolution level into the
-            // result. A bilinear tap covers a 2x2 texel neighbourhood, so it stops covering the footprint
-            // as the ratio approaches 2; 1.5 is a conservative switch-over. MipmapBox forces it on.
-            const float MipThreshold = 1.5f;
-            bool wantMips = Downsampling == DownsampleMode.MipmapBox
-                            || (Downsampling == DownsampleMode.Auto && ratio >= MipThreshold);
-
-            if (rt.width == wantW && rt.height == wantH && rt.useMipMap == wantMips)
+            SetRenderScale(s, target);
+            if (s.renderScale != target)
             {
-                if (Downsampling == DownsampleMode.Auto && !wantMips && ratio > 1f && !loggedMipDecline)
-                {
-                    loggedMipDecline = true;
-                    Log.LogInfo($"downsample: ratio {ratio:F2}x is below the {MipThreshold:F1}x threshold, "
-                                + "so plain bilinear is sharper than a mip chain here.");
-                }
+                Log.LogError($"renderScale is still {s.renderScale} after trying to set "
+                             + $"{target} - reflection failed, supersampling is OFF.");
                 return;
             }
 
-            MethodInfo setter = renderTextureProp.GetSetMethod(true);
-            if (setter == null) return;
-
-            RenderTexture next = new RenderTexture(wantW, wantH, 0, rt.format,
-                                                   RenderTextureReadWrite.Default)
+            rebuilding = true;
+            try
             {
-                name = "TrueResolution_RT",
-                useMipMap = wantMips,
-                autoGenerateMips = wantMips,      // regenerated after the camera renders into it
-                antiAliasing = 1,
-                wrapMode = rt.wrapMode,
-                filterMode = wantMips ? FilterMode.Trilinear : rt.filterMode
-            };
-
-            if (!next.Create())
-            {
-                UnityEngine.Object.Destroy(next);
-                Log.LogWarning($"could not create a {wantW}x{wantH} render texture; keeping the "
-                               + $"existing {rt.width}x{rt.height} one.");
-                return;
+                // Re-run with the current width: this releases the old texture and allocates a new
+                // one at pixelWidth * renderScale x pixelHeight * renderScale.
+                s.ReinitRenderTexture(s.pixelWidth);
             }
-
-            setter.Invoke(self, new object[] { next });
-
-            Futile f = Futile.instance;
-            if (f != null)
+            finally
             {
-                if (f.camera != null) f.camera.targetTexture = next;
-                if (f.camera2 != null) f.camera2.targetTexture = next;   // JollyCoop split-screen
-                Presentation.RebindTexture(next);
+                rebuilding = false;
             }
-
-            rt.Release();
-            UnityEngine.Object.Destroy(rt);
-
-            Log.LogInfo($"render target: {next.width}x{next.height}"
-                        + (NativeRT ? " (native, 1:1 with the backbuffer)" : "")
-                        + $"  ratio {ratio:F2}x"
-                        + (wantMips ? "  mip chain on" : ""));
-        }
-
-        /// <summary>
-        /// How big the render texture should be.
-        ///
-        /// Normally pixelWidth/Height times the integer renderScale. In Native mode it is the backbuffer
-        /// size exactly, which is legal for the same reason supersampling is: the Futile camera's
-        /// orthographicSize comes from pixelHeight and never from the render texture, so the world
-        /// framing does not move. That gives a 1:1 composite with no resampling at all, at a fraction of
-        /// the fill cost. (camera.aspect is derived from the target's dimensions, so the visible world
-        /// width shifts by the difference between the logical and display aspect ratios - 1366/768 vs
-        /// 16:9 is 0.05%, i.e. under a single world unit.)
-        /// </summary>
-        private static void DesiredRTSize(FScreen self, out int w, out int h)
-        {
-            if (NativeRT && Screen.width > 0 && Screen.height > 0)
-            {
-                w = Screen.width;
-                h = Screen.height;
-            }
-            else
-            {
-                w = self.pixelWidth * Mathf.Max(1, self.renderScale);
-                h = self.pixelHeight * Mathf.Max(1, self.renderScale);
-            }
-
-            int max = SystemInfo.maxTextureSize > 0 ? SystemInfo.maxTextureSize : 8192;
-            w = Mathf.Clamp(w, 1, max);
-            h = Mathf.Clamp(h, 1, max);
-        }
-
-        /// <summary>
-        /// Point sampling is only correct when the render texture lands on the backbuffer pixel-exactly.
-        /// The stock code (FScreen.ReinitRenderTexture / Futile.Init) picks Point whenever the display is
-        /// at least 1366x768, which is right for vanilla's 1:1 blit but wrong once EITHER side of the
-        /// composite changes size. In particular 1360 -> 2560 (1.88x, non-integer) point-magnified in
-        /// engine is visibly worse than vanilla, so this must key on the RT-vs-backbuffer ratio, not on
-        /// renderScale.
-        /// </summary>
-        private static void ApplyFilterMode(FScreen self)
-        {
-            RenderTexture rt = self?.renderTexture;
-            if (rt == null) return;
-
-            int bbW = Screen.width, bbH = Screen.height;
-            int rtW = rt.width, rtH = rt.height;
-            if (bbW <= 0 || bbH <= 0 || rtW <= 0 || rtH <= 0) return;
-
-            FilterMode want;
-            if (Downsampling == DownsampleMode.Point)
-            {
-                want = FilterMode.Point;
-            }
-            else
-            {
-                bool oneToOne = rtW == bbW && rtH == bbH;
-                bool intUpscale = !oneToOne
-                                  && rtW <= bbW && rtH <= bbH
-                                  && bbW % rtW == 0 && bbH % rtH == 0
-                                  && (bbW / rtW) == (bbH / rtH);
-
-                if (oneToOne || intUpscale)
-                {
-                    // Pixel-exact or an exact integer magnification: nearest neighbour is the correct,
-                    // sharpest choice and a mip chain would only ever blur it.
-                    want = FilterMode.Point;
-                }
-                else
-                {
-                    // Trilinear is only meaningful with mips present; without them Unity treats it as
-                    // bilinear anyway, so asking for it unconditionally would be misleading in the log.
-                    want = rt.useMipMap ? FilterMode.Trilinear : FilterMode.Bilinear;
-                }
-            }
-
-            if (rt.filterMode != want) rt.filterMode = want;
+            Log.LogInfo($"render texture is now {s.pixelWidth * s.renderScale}x"
+                        + $"{s.pixelHeight * s.renderScale} "
+                        + $"(logical {s.pixelWidth}x{s.pixelHeight}, {s.renderScale}x"
+                        + (Quality == 0 ? ", auto" : "") + ")");
         }
 
         // ---------------------------------------------------------------- hooks
@@ -653,81 +447,65 @@ namespace TrueResolution
             }
         }
 
-        private static void FScreen_ctor(On.FScreen.orig_ctor orig, FScreen self, FutileParams futileParams)
+        private static void FScreen_ctor(On.FScreen.orig_ctor orig, FScreen s, FutileParams futileParams)
         {
-            orig(self, futileParams);
+            orig(s, futileParams);
             // The constructor just pinned renderScale to 1 and allocated a 1x texture; upgrade it.
-            try { EnsureRenderScale(self); }
+            try { EnsureRenderScale(s); }
             catch (Exception e) { Log.LogError("FScreen ctor postfix failed, supersampling is OFF: " + e); }
         }
 
         private static void FScreen_ReinitRenderTexture(
-            On.FScreen.orig_ReinitRenderTexture orig, FScreen self, int displayWidth)
+            On.FScreen.orig_ReinitRenderTexture orig, FScreen s, int displayWidth)
         {
-            orig(self, displayWidth);
-            // orig() reallocated using the *current* renderScale. If that is already what we want the
-            // texture is correctly sized and we only need to restore the filter mode.
+            orig(s, displayWidth);
+            // orig() reallocated using the *current* renderScale; re-check in case the wanted scale
+            // changed (an options-menu resolution change goes through here, and in auto mode the right
+            // scale can shift when the backbuffer does).
             try
             {
-                if (rebuilding) ApplyFilterMode(self);
-                else EnsureRenderScale(self);
+                if (!rebuilding) EnsureRenderScale(s);
             }
             catch (Exception e) { Log.LogError("ReinitRenderTexture postfix failed: " + e); }
         }
 
-        private static void FScreen_UpdateScreenOffset(On.FScreen.orig_UpdateScreenOffset orig, FScreen self)
+        private static void Futile_Init(On.Futile.orig_Init orig, Futile f, FutileParams futileParams)
         {
-            orig(self);
-            if (!LegacyScreenOffset || Futile.isOpenGL) return;
+            orig(f, futileParams);
             try
             {
-                Futile.screenPixelOffset = new Vector2(0.5f * Futile.displayScaleInverse,
-                                                       0.5f * Futile.displayScaleInverse);
-                Shader.SetGlobalVector(RainWorld.ShadPropScreenOffset, Vector2.zero);
-            }
-            catch (Exception e) { Log.LogError("UpdateScreenOffset postfix failed: " + e); }
-        }
-
-        private static void Futile_Init(On.Futile.orig_Init orig, Futile self, FutileParams futileParams)
-        {
-            orig(self, futileParams);
-            // Futile.Init overwrites filterMode after constructing FScreen, so re-assert it here.
-            try
-            {
-                ApplyFilterMode(Futile.screen);
                 FScreen s = Futile.screen;
                 if (s != null && s.renderTexture != null)
                     Log.LogInfo($"FScreen: logical {s.pixelWidth}x{s.pixelHeight} renderScale={s.renderScale} "
                                 + $"RT={s.renderTexture.width}x{s.renderTexture.height} "
                                 + $"filter={s.renderTexture.filterMode} | backbuffer {Screen.width}x{Screen.height} "
-                                + $"| isOpenGL={Futile.isOpenGL} screenPixelOffset={Futile.screenPixelOffset}");
+                                + $"| isOpenGL={Futile.isOpenGL}");
             }
             catch (Exception e) { Log.LogError("Futile.Init postfix failed: " + e); }
         }
 
         /// <summary>
-        /// Futile.UpdateCameraPosition (Futile.cs:494-512) is the ONLY writer of _cameraImage.uvRect and
-        /// Futile.subjectToAspectRatioIrregularity in the whole game (verified by grep: Futile.cs:510/511
-        /// are the only assignments; the only reader of the flag is RoomCamera.cs:1289). It does NOT touch
-        /// the RectTransform, so our letterbox geometry is never undone and only the uvRect needs
-        /// re-asserting. Hooking here covers every path that can change it: Futile.Init (:224),
-        /// Futile.UpdateScreenWidth (:284) and the FScreen.originX/originY setters (FScreen.cs:34/:50).
+        /// Futile.UpdateCameraPosition is the only writer of _cameraImage.uvRect and
+        /// Futile.subjectToAspectRatioIrregularity in the whole game, and it does not touch the
+        /// RectTransform - so the letterbox geometry is never undone and only needs re-asserting here.
+        /// This covers every path that can change it: Futile.Init, Futile.UpdateScreenWidth and the
+        /// FScreen.originX/originY setters.
         /// </summary>
-        private static void Futile_UpdateCameraPosition(On.Futile.orig_UpdateCameraPosition orig, Futile self)
+        private static void Futile_UpdateCameraPosition(On.Futile.orig_UpdateCameraPosition orig, Futile f)
         {
-            orig(self);
+            orig(f);
             try { Presentation.Apply(); }
             catch (Exception e) { Log.LogError("UpdateCameraPosition postfix failed: " + e); }
         }
 
-        private void Options_OnLoadFinished(On.Options.orig_OnLoadFinished orig, Options self)
+        private void Options_OnLoadFinished(On.Options.orig_OnLoadFinished orig, Options o)
         {
             // Never swallow orig(): if it throws the game is half-initialised and continuing is worse.
-            orig(self);
+            orig(o);
             try
             {
-                lastOptions = self;
-                if (!cfgNativeBackbuffer.Value || !self.fullScreen) return;
+                lastOptions = o;
+                if (!cfgNativeBackbuffer.Value || !o.fullScreen) return;
 
                 int w, h;
                 if (!ResolveTarget(out w, out h)) return;
@@ -896,9 +674,7 @@ namespace TrueResolution
                     Log.LogInfo($"backbuffer: CONFIRMED {Screen.width}x{Screen.height} "
                                 + $"mode={Screen.fullScreenMode} after {VerifyFrames - pendingFrames} frames");
                     pendingW = 0; attempts = 0;
-                    // The correct filter mode depends on the RT-vs-backbuffer ratio, and the backbuffer
-                    // has only just settled - the lifecycle hooks ran with a stale Screen.width.
-                    ApplyFilterMode(Futile.screen);
+                    RefitAutoScale();
                 }
                 else if (--pendingFrames <= 0)
                 {
@@ -915,6 +691,8 @@ namespace TrueResolution
 
             if (++frameCounter < 30) return;
             frameCounter = 0;
+
+            RefitAutoScale();
 
             // 2. Throttled re-assert. Four of the five vanilla Screen.SetResolution sites are not hooked
             //    (Menu/OptionsMenu.cs:1088, 1101, 1105 and Options.cs:1115), so this is their recovery.
@@ -946,6 +724,23 @@ namespace TrueResolution
             // Note the comparison is != , not < : an explicitly configured target smaller than the
             // current backbuffer must also be honoured.
             RequestBackbuffer(w, h, "poll", false);
+        }
+
+        /// <summary>
+        /// In automatic mode the correct scale depends on the backbuffer, which is not final until our
+        /// request lands (the FScreen constructor usually runs against the desktop resolution, which
+        /// gives the same answer - but ordering is not guaranteed on every machine). Rebuild through the
+        /// game's own UpdateScreenWidth, the only path that also rebinds the cameras and the RawImage.
+        /// </summary>
+        private void RefitAutoScale()
+        {
+            if (Quality != 0) return;
+            FScreen s = Futile.screen;
+            if (s == null || Futile.instance == null || rebuilding) return;
+            if (s.renderScale == EffectiveScale(s)) return;
+
+            Log.LogInfo("auto quality: backbuffer changed, refitting the render scale");
+            Futile.instance.UpdateScreenWidth(s.pixelWidth);
         }
     }
 }

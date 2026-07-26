@@ -7,12 +7,12 @@ namespace TrueResolution
     /// <summary>
     /// The mod's page in the in-game Remix config menu (main menu -> Remix -> True Resolution -> cog).
     ///
-    /// Two controls, because there are only two decisions a player actually has to make: how much to
-    /// render, and whether they want the default hard pixels or a smoothed image. Everything else either has one correct
-    /// answer (present at the display's real resolution) or can be worked out from the numbers (which
-    /// filter to use), so it is decided automatically and left in the config file as an escape hatch.
+    /// One slider, because there is only one decision a player might want to make: how much to render.
+    /// Its default (0 = automatic) picks the smallest integer scale that covers the displayed picture,
+    /// so most people never touch even that. Everything else has one correct answer and is decided
+    /// automatically; the config file keeps troubleshooting overrides.
     ///
-    /// A third control appears only where it means something: on a non-16:9 display, where the player
+    /// A second control appears only where it means something: on a non-16:9 display, where the player
     /// genuinely has to choose between black bars and a stretched picture.
     ///
     /// The BepInEx config file stays the storage. This page seeds from it on open and writes back on
@@ -21,7 +21,6 @@ namespace TrueResolution
     internal class TrueResolutionOptions : OptionInterface
     {
         internal readonly Configurable<int> quality;
-        internal readonly Configurable<bool> smoothScaling;
         internal readonly Configurable<bool> stretchToFill;
 
         private OpLabel qualityValue;
@@ -30,29 +29,14 @@ namespace TrueResolution
         internal TrueResolutionOptions()
         {
             quality = config.Bind(
-                "Supersample", 2,
+                "RenderQuality", 0,
                 new ConfigurableInfo(
-                    "How much detail to render.\n"
-                    + "0 = Native: render exactly at your screen's resolution. A 1:1 composite with no "
-                    + "resampling at all, the sharpest option for creatures, rain, HUD and text, and by "
-                    + "far the cheapest. Worth comparing against 2 and 4 - which looks better on room "
-                    + "artwork is a matter of taste.\n"
-                    + "2 is a good general default.\n"
-                    + "With Smooth scaling OFF, higher values genuinely keep helping: the room artwork "
-                    + "is magnified inside the engine with hard pixels instead of being stretched by "
-                    + "your monitor, and a denser render places every pixel edge more precisely, so the "
-                    + "image is crisper and stays steadier as the camera pans. Raise it until the "
-                    + "framerate stops being comfortable.\n"
-                    + "With Smooth scaling ON the returns fade much sooner, because filtering averages "
-                    + "that precision away again.",
+                    "How much detail to render. Auto (the default) picks the cheapest clean setting "
+                    + "for your display and is the right choice for almost everyone. Higher fixed "
+                    + "values render even denser pixels at a cost that grows with the square of the "
+                    + "number - the image gets slightly crisper and steadier in motion. Room "
+                    + "backgrounds are fixed artwork and never gain detail.",
                     new ConfigAcceptableRange<int>(0, 8)));
-
-            smoothScaling = config.Bind(
-                "SmoothScaling", false,
-                new ConfigurableInfo(
-                    "Off (default) keeps hard pixel edges, which suits Rain World's pixel art and is "
-                    + "what most people prefer. Turn it on for a smoothed, filtered image instead - the "
-                    + "best filter for your resolution is then chosen automatically."));
 
             stretchToFill = config.Bind(
                 "StretchToFill", false,
@@ -83,7 +67,7 @@ namespace TrueResolution
 
             y -= 30f;
             tab.AddItems(new OpLabel(new Vector2(labelX, y), new Vector2(520f, 20f),
-                                     "Changes apply immediately. Hover a setting for details.",
+                                     "Works out of the box. Changes apply immediately.",
                                      FLabelAlignment.Left));
 
             // ---- Render quality
@@ -92,17 +76,9 @@ namespace TrueResolution
             {
                 description = quality.info.description
             };
-            qualityValue = new OpLabel(new Vector2(ctrlX + 172f, y), new Vector2(180f, 24f), "",
+            qualityValue = new OpLabel(new Vector2(ctrlX + 172f, y), new Vector2(200f, 24f), "",
                                        FLabelAlignment.Left);
             tab.AddItems(Row(labelX, y, "Render quality"), slider, qualityValue);
-
-            // ---- Sharp pixels
-            y -= 50f;
-            tab.AddItems(Row(labelX, y, "Smooth scaling"),
-                         new OpCheckBox(smoothScaling, new Vector2(ctrlX, y))
-                         {
-                             description = smoothScaling.info.description
-                         });
 
             // Only offer the aspect choice where it changes anything. On a 16:9 screen both settings look
             // identical, and a control that visibly does nothing is worse than no control.
@@ -156,13 +132,15 @@ namespace TrueResolution
                 int v = quality.Value;
                 // Show the resolution the slider actually buys, so the number means something.
                 if (v == 0)
-                    qualityValue.text = $"native  ({Screen.width}x{Screen.height})";
+                    qualityValue.text = s != null && s.renderTexture != null
+                        ? $"auto  ({s.renderTexture.width}x{s.renderTexture.height})"
+                        : "auto";
                 else
                 {
                     string res = s != null && s.pixelWidth > 0
                         ? $"  ({s.pixelWidth * v}x{s.pixelHeight * v})"
                         : "";
-                    qualityValue.text = (v == 1 ? "1x" : v + "x") + res;
+                    qualityValue.text = v + "x" + res;
                 }
             }
 
@@ -174,8 +152,7 @@ namespace TrueResolution
             }
 
             status.text = $"rendering {s.renderTexture.width}x{s.renderTexture.height}"
-                          + $"  ->  your screen {Screen.width}x{Screen.height}"
-                          + $"  ({s.renderTexture.filterMode})";
+                          + $"  ->  your screen {Screen.width}x{Screen.height}";
         }
 
         // ---------------------------------------------------------------- sync
@@ -184,8 +161,7 @@ namespace TrueResolution
         {
             try
             {
-                quality.Value = Plugin.CurrentSupersample;
-                smoothScaling.Value = Plugin.CurrentDownsample != DownsampleMode.Point;
+                quality.Value = Plugin.CurrentQuality;
                 stretchToFill.Value = Plugin.CurrentAspect == AspectMode.Stretch;
             }
             catch (Exception e)
@@ -198,17 +174,13 @@ namespace TrueResolution
         {
             try
             {
-                // Unchecking these must not stamp on a deliberate MipmapBox/Bilinear or AspectBackbuffer
-                // choice made in the config file, so only override when the checkbox actually disagrees.
-                DownsampleMode ds = Plugin.CurrentDownsample;
-                if (!smoothScaling.Value) ds = DownsampleMode.Point;
-                else if (ds == DownsampleMode.Point) ds = DownsampleMode.Auto;
-
+                // Unticking must not stamp on a deliberate AspectBackbuffer choice made in the config
+                // file, so only override when the checkbox actually disagrees.
                 AspectMode am = Plugin.CurrentAspect;
                 if (stretchToFill.Value) am = AspectMode.Stretch;
                 else if (am == AspectMode.Stretch) am = AspectMode.Letterbox;
 
-                Plugin.ApplyFromOptions(quality.Value, Plugin.CurrentNativeBackbuffer, ds, am);
+                Plugin.ApplyFromOptions(quality.Value, am);
                 Refresh();
             }
             catch (Exception e)
