@@ -226,6 +226,58 @@ This mod never writes `FScreen.pixelWidth`, `FScreen.pixelHeight`,
 
 ---
 
+## Performance
+
+**Short version: if in doubt, leave `Supersample` at 2. If your GPU is old or
+your screen is large, set it to 1 — you keep the bigger half of the benefit for
+free.**
+
+The two halves of this mod cost wildly different amounts:
+
+- **`NativeBackbuffer` is nearly free.** It presents at your real resolution
+  instead of letting the game shrink the window. No extra rendering, and it is
+  the single biggest visual improvement. There is no reason to turn it off.
+- **`Supersample` is the expensive half**, and its cost scales with the *square*
+  of the value.
+
+What you are actually rendering, on a 1366×768 logical screen:
+
+| Supersample | Render target | Megapixels | Target VRAM (with mips) |
+|---|---|---|---|
+| 1 | 1366×768 | 1.0 | ~6 MB |
+| 2 (default) | 2732×1536 | 4.2 | ~22 MB |
+| 3 | 4098×2304 | 9.4 | ~50 MB |
+| 4 | 5464×3072 | 16.8 | ~89 MB |
+| 8 | 10928×6144 | 67.1 | ~357 MB |
+
+Note that even `Supersample = 2` is 4.2 MP — already more than a 2560×1440
+backbuffer. **Past 2, you are supersampling above your own display**, which buys
+anti-aliasing quality and nothing else. Room terrain never improves at any
+setting, because it is a fixed 1400×800 image per screen.
+
+### Will it run on my GPU?
+
+Measured: an RX 9070 XT holds a 360 Hz refresh cap in-game at `Supersample = 4`,
+so it was never the bottleneck. Everything below that is **estimated from memory
+bandwidth**, which is the right proxy because the cost here is dominated by
+Rain World's grab passes — the shader library declares 112 of them, 81 unnamed,
+and an unnamed grab copies the entire render target once per drawing object.
+Only shaders for effects present in the current room execute, so the real cost
+swings a lot between a bare corridor and a rain-soaked, water-filled room.
+
+| Tier | Suggested setting |
+|---|---|
+| Modern mid-range and up (RX 6700 XT / RTX 3060 and better) | `2`, or `3–4` at 1080p if you want to experiment |
+| Budget/older (RX 6500 XT, RTX 3050, GTX 1650) at 1080p | `2` should be comfortable; drop to `1` if a heavy rain room dips |
+| 4 GB cards at 1440p or 4K | `1`. Each *named* grab pass allocates another full-size texture and there are 20 distinct ones; at high scales that adds up fast on a small framebuffer |
+| Integrated graphics / Steam Deck | `1`. The native backbuffer still helps and costs nothing |
+
+If you are chasing a number, note that **frames per second will not tell you the
+cost if you are hitting a refresh cap or v-sync** — watch GPU utilisation or
+frame time instead.
+
+---
+
 ## Config
 
 `BepInEx/config/steinkoloss.trueresolution.cfg`, written on the first successful run.

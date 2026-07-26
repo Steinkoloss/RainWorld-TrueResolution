@@ -104,15 +104,22 @@ namespace TrueResolution
                 new ConfigDescription(
                     "Internal render scale. The game renders the same view at this multiple of its "
                     + "internal 768-pixel-tall buffer (1024-1366 wide depending on the aspect-ratio "
-                    + "option), then it is filtered down to your screen. 2 is the sweet spot.\n"
-                    + "Cost scales with the SQUARE of this value and Rain World's renderer is "
-                    + "fill-bound with 100+ GrabPasses, each of which copies the whole target - so 4 is "
-                    + "roughly 4x the fill cost of 2, and 8 is 16x. Returns diminish fast because room "
-                    + "terrain is a fixed 1400x800 image per screen and cannot gain detail; only the "
-                    + "procedurally drawn art (creatures, rain, water, HUD, text) keeps improving.\n"
-                    + "Values above 4 are there to be experimented with, not recommended. The scale is "
-                    + "automatically clamped so the render texture stays within the GPU's maximum "
-                    + "texture size. 1 disables supersampling.",
+                    + "option), then it is filtered down to your screen.\n"
+                    + "2 is the sweet spot, and on most displays it is already at or above native: at a "
+                    + "1360x768 logical screen, 2 gives 2720x1536, which already exceeds a 1440p "
+                    + "backbuffer. Past that point you are supersampling ABOVE your display, which buys "
+                    + "smoother edges (anti-aliasing) and nothing else. Room terrain cannot improve at any "
+                    + "scale - it is a fixed 1400x800 image per screen - so only the procedurally drawn "
+                    + "art (creatures, rain, water, HUD, text) keeps benefiting, and only in how cleanly "
+                    + "it is resolved.\n"
+                    + "Cost scales with the SQUARE of this value, but how much that hurts is very "
+                    + "room-dependent. The shader library declares 112 GrabPasses, 81 of them unnamed, "
+                    + "and an unnamed grab copies the entire render target once per drawing object - but "
+                    + "only shaders belonging to effects actually present in the current room ever run. A "
+                    + "fast GPU can sit at its refresh cap even at 4; a water- and rain-heavy room on a "
+                    + "modest GPU will struggle much sooner.\n"
+                    + "The scale is clamped automatically so the render texture stays within the GPU's "
+                    + "maximum texture size. 1 disables supersampling.",
                     new AcceptableValueRange<int>(1, 8)));
 
             cfgNativeBackbuffer = Config.Bind(
@@ -329,15 +336,17 @@ namespace TrueResolution
                                + $"({pw * eff}x{ph * eff}).");
             }
 
-            if (eff >= 4 && loggedCostOf != eff)
+            if (eff >= 3 && loggedCostOf != eff)
             {
                 loggedCostOf = eff;
                 long px = (long)pw * eff * ph * eff;
-                Log.LogWarning($"Supersample {eff} renders {px / 1000000f:F1} megapixels per frame "
-                               + $"(~{px * 4L / 1048576L} MB for the target alone), {eff * eff / 4f:F1}x the "
-                               + "fill cost of the default 2. Rain World is fill-bound with 100+ GrabPasses; "
-                               + "expect a large framerate drop for very little visible gain, since room "
-                               + "terrain is fixed 1400x800 art.");
+                // Informational, not a warning of doom: the actual hit depends entirely on how many
+                // grab-pass effects the current room uses, and a fast GPU may not notice at all.
+                Log.LogInfo($"Supersample {eff}: {pw * eff}x{ph * eff}, {px / 1000000f:F1} MP/frame "
+                            + $"(~{px * 4L / 1048576L} MB for the target), {eff * eff / 4f:F1}x the fill cost "
+                            + "of the default 2. Cost is room-dependent (unnamed GrabPasses copy the whole "
+                            + "target per drawing object). Note this is already well above your backbuffer, "
+                            + "so the gain is anti-aliasing only - terrain is fixed 1400x800 art.");
             }
             return eff;
         }
