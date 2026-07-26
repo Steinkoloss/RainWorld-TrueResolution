@@ -7,6 +7,11 @@ can see**.
 Built and tested against **Rain World v1.11.8** (Downpour + Watcher),
 Unity 2020.3.45f1, BepInEx 5.4.17.
 
+![True Resolution (left) versus vanilla (right) — the same room, same crop, both at 400% zoom](docs/img/comparison-400pct.png)
+
+*Left: True Resolution. Right: vanilla. Same room, same crop, both at 400% zoom
+on a 1440p display.*
+
 ---
 
 ## Install (Windows, no build tools)
@@ -140,6 +145,10 @@ being scaled twice, so they get *cleaner*, not *more detailed*.
 
 **Not a wider field of view.** This is the deliberate design limit, not an
 oversight. See [what is not done](#what-is-explicitly-not-done).
+
+| True Resolution | Vanilla |
+|---|---|
+| ![Full frame with the mod](docs/img/full-modded.png) | ![The same view in vanilla](docs/img/full-vanilla.png) |
 
 ### 1920×1080
 
