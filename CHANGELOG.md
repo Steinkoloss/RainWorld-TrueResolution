@@ -10,6 +10,30 @@ do not.
 csproj reads `$(Version)` out of it, and `tools/check-metadata.py` asserts that
 `src/Plugin.cs` and this file match.
 
+## 1.5.0
+
+### Changed
+- **Hard pixels are now the default.** Rain World is pixel art and nearest-neighbour
+  scaling suits it, so `Downsample` defaults to `Point` and the settings page
+  offers **Smooth scaling** as an opt-in instead of the reverse. Existing configs
+  keep whatever they already say.
+- Removed the `SmoothDownsample` switch. Its only job was forcing point sampling,
+  which `Downsample = Point` now does, and shipping two overlapping controls for
+  one behaviour was worse than shipping one.
+
+### Fixed
+- Corrected the supersampling guidance, which previously claimed values above 2
+  bought "anti-aliasing only" because room terrain is fixed 1400×800 artwork.
+  That was wrong for the pixelated path. The room texture is `FilterMode.Point`
+  (`PersistentData.cs:18`); vanilla draws it 1:1 into a 768-tall buffer and lets
+  the *display* stretch that by a non-integer factor, blurring across every hard
+  texel boundary outside the engine. Supersampling moves the magnification inside
+  the engine, where it stays hard-edged, and a denser render quantises the level
+  graphic's fractional camera position more finely — at 1x edges snap to whole
+  pixels, at 8x to an eighth of one — so they land accurately and stop crawling
+  when the camera pans. Higher values therefore keep paying off with smoothing
+  off; the returns only fade quickly with smoothing on.
+
 ## 1.4.0
 
 ### Changed

@@ -250,10 +250,24 @@ What you are actually rendering, on a 1366×768 logical screen:
 | 4 | 5464×3072 | 16.8 | ~89 MB |
 | 8 | 10928×6144 | 67.1 | ~357 MB |
 
-Note that even `Supersample = 2` is 4.2 MP — already more than a 2560×1440
-backbuffer. **Past 2, you are supersampling above your own display**, which buys
-anti-aliasing quality and nothing else. Room terrain never improves at any
-setting, because it is a fixed 1400×800 image per screen.
+**Higher values keep helping, and it is worth understanding why**, because it is
+not "more texture detail" — the room artwork really is a fixed 1400×800 image.
+
+That image is `FilterMode.Point` (`PersistentData.cs:18`). In vanilla it is drawn
+1:1 into a 768-tall buffer, and then your *monitor* stretches that to the panel by
+a non-integer factor, blurring across every hard pixel-art boundary. That happens
+outside the engine, where nothing can control it, and it is the single biggest
+reason vanilla looks soft.
+
+Supersampling moves that magnification **inside** the engine, where it is done
+with hard pixels. On top of that, a denser render quantises positions more finely:
+the level graphic sits at fractional camera coordinates, so at 1x every edge snaps
+to a whole pixel, while at 8x it resolves to an eighth of one. Edges land where
+they belong and stop crawling as the camera pans.
+
+So with **Smooth scaling off** (the default), raise this until the framerate stops
+being comfortable. With smoothing **on**, the returns fade much sooner, because
+filtering averages that precision back out.
 
 ### Will it run on my GPU?
 
@@ -290,7 +304,7 @@ If the file is not there, the plugin never loaded — see
 | `NativeBackbuffer` | `true` | Present at native resolution in fullscreen. Windowed mode is left alone deliberately. |
 | `AspectMode` | `Letterbox` | `Letterbox` fits the ~16:9 picture inside the native backbuffer with bars. `Off` reverts to vanilla full-stretch. `BackbufferAspect` asks Unity for an already-correct backbuffer instead (a fallback; unreliable on some drivers). |
 | `TargetWidth` / `TargetHeight` | `0` | `0` = auto-detect. Set **both** if the log shows the wrong display. |
-| `SmoothDownsample` | `true` | Filter the render texture when it is not composited pixel-exactly. `false` = hard pixelated, and it will alias badly. |
+| `Downsample` | `Point` | Hard pixel edges by default. `Auto` smooths and picks the best filter for your resolution. |
 | `LegacyScreenOffset` | `false` | Diagnostic A/B for a half-pixel shift. Only touch it if you are chasing one. |
 
 **If the framerate drops, set `Supersample = 1`.** You keep the native-backbuffer

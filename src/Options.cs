@@ -8,7 +8,7 @@ namespace TrueResolution
     /// The mod's page in the in-game Remix config menu (main menu -> Remix -> True Resolution -> cog).
     ///
     /// Two controls, because there are only two decisions a player actually has to make: how much to
-    /// render, and whether they want smooth or pixelated scaling. Everything else either has one correct
+    /// render, and whether they want the default hard pixels or a smoothed image. Everything else either has one correct
     /// answer (present at the display's real resolution) or can be worked out from the numbers (which
     /// filter to use), so it is decided automatically and left in the config file as an escape hatch.
     ///
@@ -21,7 +21,7 @@ namespace TrueResolution
     internal class TrueResolutionOptions : OptionInterface
     {
         internal readonly Configurable<int> quality;
-        internal readonly Configurable<bool> sharpPixels;
+        internal readonly Configurable<bool> smoothScaling;
         internal readonly Configurable<bool> stretchToFill;
 
         private OpLabel qualityValue;
@@ -32,18 +32,25 @@ namespace TrueResolution
             quality = config.Bind(
                 "Supersample", 2,
                 new ConfigurableInfo(
-                    "How much detail to render. 2 is the sweet spot and is already sharper than most "
-                    + "screens can show. Higher values only smooth edges further and cost a lot more; "
-                    + "1 turns supersampling off but keeps the rest of the mod, which is the bigger "
-                    + "improvement anyway. Room backgrounds never change - they are fixed artwork.",
+                    "How much detail to render. 2 is a good default and 1 still keeps the rest of the "
+                    + "mod.\n"
+                    + "With Smooth scaling OFF, higher values genuinely keep helping: the room artwork "
+                    + "is magnified inside the engine with hard pixels instead of being stretched by "
+                    + "your monitor, and a denser render places every pixel edge more precisely, so the "
+                    + "image is crisper and stays steadier as the camera pans. Raise it until the "
+                    + "framerate stops being comfortable.\n"
+                    + "With Smooth scaling ON the returns fade much sooner, because filtering averages "
+                    + "that precision away again.",
                     new ConfigAcceptableRange<int>(1, 8)));
 
-            sharpPixels = config.Bind(
-                "SharpPixels", false,
+            smoothScaling = config.Bind(
+                "SmoothScaling", false,
                 new ConfigurableInfo(
-                    "Scale with hard nearest-neighbour pixels instead of smoothing. Off is recommended "
-                    + "and picks the best filter for your resolution by itself. On gives a crunchy, "
-                    + "pixelated look and will shimmer when the camera moves."));
+                    "Off (default) keeps hard pixel edges, which suits Rain World's pixel art and is "
+                    + "what most people prefer. Turn it on for a smoothed, filtered image instead - the "
+                    + "best filter for your resolution is then chosen automatically. With it off, keep "
+                    + "Render quality near 2: that lands the render close to your screen's resolution, "
+                    + "and much higher values discard most of the extra detail and shimmer in motion."));
 
             stretchToFill = config.Bind(
                 "StretchToFill", false,
@@ -89,10 +96,10 @@ namespace TrueResolution
 
             // ---- Sharp pixels
             y -= 50f;
-            tab.AddItems(Row(labelX, y, "Sharp pixels"),
-                         new OpCheckBox(sharpPixels, new Vector2(ctrlX, y))
+            tab.AddItems(Row(labelX, y, "Smooth scaling"),
+                         new OpCheckBox(smoothScaling, new Vector2(ctrlX, y))
                          {
-                             description = sharpPixels.info.description
+                             description = smoothScaling.info.description
                          });
 
             // Only offer the aspect choice where it changes anything. On a 16:9 screen both settings look
@@ -171,7 +178,7 @@ namespace TrueResolution
             try
             {
                 quality.Value = Plugin.CurrentSupersample;
-                sharpPixels.Value = Plugin.CurrentDownsample == DownsampleMode.Point;
+                smoothScaling.Value = Plugin.CurrentDownsample != DownsampleMode.Point;
                 stretchToFill.Value = Plugin.CurrentAspect == AspectMode.Stretch;
             }
             catch (Exception e)
@@ -187,7 +194,7 @@ namespace TrueResolution
                 // Unchecking these must not stamp on a deliberate MipmapBox/Bilinear or AspectBackbuffer
                 // choice made in the config file, so only override when the checkbox actually disagrees.
                 DownsampleMode ds = Plugin.CurrentDownsample;
-                if (sharpPixels.Value) ds = DownsampleMode.Point;
+                if (!smoothScaling.Value) ds = DownsampleMode.Point;
                 else if (ds == DownsampleMode.Point) ds = DownsampleMode.Auto;
 
                 AspectMode am = Plugin.CurrentAspect;

@@ -43,7 +43,7 @@ namespace TrueResolution
     {
         public const string PluginGuid = "steinkoloss.trueresolution";
         public const string PluginName = "True Resolution";
-        public const string PluginVersion = "1.4.0";
+        public const string PluginVersion = "1.5.0";
 
         internal static ManualLogSource Log;
 
@@ -51,7 +51,6 @@ namespace TrueResolution
         private ConfigEntry<bool> cfgNativeBackbuffer;
         private ConfigEntry<int> cfgTargetWidth;
         private ConfigEntry<int> cfgTargetHeight;
-        private ConfigEntry<bool> cfgSmoothDownsample;
         private ConfigEntry<bool> cfgLegacyScreenOffset;
         private ConfigEntry<AspectMode> cfgAspectMode;
         private ConfigEntry<DownsampleMode> cfgDownsample;
@@ -64,9 +63,8 @@ namespace TrueResolution
         private static bool rebuilding;
 
         private static int DesiredScale = 2;
-        private static bool SmoothDownsample = true;
         private static bool LegacyScreenOffset;
-        private static DownsampleMode Downsampling = DownsampleMode.Auto;
+        private static DownsampleMode Downsampling = DownsampleMode.Point;
 
         /// <summary>Setter for FScreen.renderTexture, which is an auto-property with a private set.</summary>
         private static PropertyInfo renderTextureProp;
@@ -163,20 +161,21 @@ namespace TrueResolution
                 new ConfigDescription(
                     "Internal render scale. The game renders the same view at this multiple of its "
                     + "internal 768-pixel-tall buffer (1024-1366 wide depending on the aspect-ratio "
-                    + "option), then it is filtered down to your screen.\n"
-                    + "2 is the sweet spot, and on most displays it is already at or above native: at a "
-                    + "1360x768 logical screen, 2 gives 2720x1536, which already exceeds a 1440p "
-                    + "backbuffer. Past that point you are supersampling ABOVE your display, which buys "
-                    + "smoother edges (anti-aliasing) and nothing else. Room terrain cannot improve at any "
-                    + "scale - it is a fixed 1400x800 image per screen - so only the procedurally drawn "
-                    + "art (creatures, rain, water, HUD, text) keeps benefiting, and only in how cleanly "
-                    + "it is resolved.\n"
-                    + "Cost scales with the SQUARE of this value, but how much that hurts is very "
-                    + "room-dependent. The shader library declares 112 GrabPasses, 81 of them unnamed, "
-                    + "and an unnamed grab copies the entire render target once per drawing object - but "
-                    + "only shaders belonging to effects actually present in the current room ever run. A "
-                    + "fast GPU can sit at its refresh cap even at 4; a water- and rain-heavy room on a "
-                    + "modest GPU will struggle much sooner.\n"
+                    + "option), then it is scaled down to your screen.\n"
+                    + "With Downsample=Point (the default) higher values keep paying off. Room artwork is "
+                    + "a Point-filtered texture, so supersampling magnifies it INSIDE the engine with hard "
+                    + "pixel edges, instead of letting the display stretch a 768-tall image by a "
+                    + "non-integer factor and blur across every texel boundary - which is what vanilla "
+                    + "does and why vanilla looks soft. A denser render also quantises sprite positions "
+                    + "more finely (the level graphic is placed at fractional camera coordinates), so "
+                    + "edges land accurately and stop crawling when the camera pans.\n"
+                    + "With a smoothing filter the returns fade much sooner, because filtering averages "
+                    + "that precision back out.\n"
+                    + "Cost scales with the SQUARE of this value, and how much that hurts is very "
+                    + "room-dependent: the shader library declares 112 GrabPasses, 81 of them unnamed, "
+                    + "and an unnamed grab copies the whole render target once per drawing object - but "
+                    + "only shaders for effects present in the current room ever run. Raise it until the "
+                    + "framerate stops being comfortable.\n"
                     + "The scale is clamped automatically so the render texture stays within the GPU's "
                     + "maximum texture size. 1 disables supersampling.",
                     new AcceptableValueRange<int>(1, 8)));
@@ -196,15 +195,15 @@ namespace TrueResolution
                 "Rendering", "TargetHeight", 0,
                 "Fullscreen backbuffer height. 0 = auto-detect the display's native height.");
 
-            cfgSmoothDownsample = Config.Bind(
-                "Rendering", "SmoothDownsample", true,
-                "Filter the render texture when it is not composited pixel-exactly onto the backbuffer. "
-                + "Turn this off only if you want a hard pixelated look (it will alias badly).");
-
             cfgDownsample = Config.Bind(
-                "Rendering", "Downsample", DownsampleMode.Auto,
+                "Rendering", "Downsample", DownsampleMode.Point,
                 "Filter used to get the supersampled render texture down to your screen.\n"
-                + "Auto (recommended): MipmapBox once the render texture is at least 1.5x the backbuffer, "
+                + "Point (default): nearest neighbour, keeping hard pixel edges. Rain World is pixel art "
+                + "and most people prefer this. It pairs best with a Supersample that lands near your "
+                + "screen's resolution - at 2 on a 1440p screen the render texture is within 7% of the "
+                + "backbuffer, so this is very nearly a 1:1 blit. Much higher values throw most of the "
+                + "extra samples away and will shimmer in motion.\n"
+                + "Auto: MipmapBox once the render texture is at least 1.5x the backbuffer, "
                 + "plain bilinear below that. The threshold exists because mipmapping buys freedom from "
                 + "aliasing and pays in sharpness - near 1:1 that is a net loss, since trilinear blends "
                 + "part of a half-resolution level in to suppress aliasing bilinear was already "
@@ -237,7 +236,6 @@ namespace TrueResolution
                 + "Stretch: vanilla behaviour. The picture is distorted on any non-16:9 display.");
 
             DesiredScale = Mathf.Clamp(cfgSupersample.Value, 1, 8);
-            SmoothDownsample = cfgSmoothDownsample.Value;
             LegacyScreenOffset = cfgLegacyScreenOffset.Value;
             Downsampling = cfgDownsample.Value;
             Presentation.Mode = cfgAspectMode.Value;
@@ -266,7 +264,7 @@ namespace TrueResolution
             Log.LogInfo($"{PluginName} {PluginVersion} loaded. cfg: supersample={DesiredScale} "
                         + $"nativeBackbuffer={cfgNativeBackbuffer.Value} "
                         + $"target={(cfgTargetWidth.Value > 0 ? cfgTargetWidth.Value + "x" + cfgTargetHeight.Value : "auto")} "
-                        + $"smoothDownsample={SmoothDownsample} legacyScreenOffset={LegacyScreenOffset}");
+                        + $"downsample={Downsampling} legacyScreenOffset={LegacyScreenOffset}");
             Log.LogInfo($"gfx: '{SystemInfo.graphicsDeviceVersion}' device='{SystemInfo.graphicsDeviceName}' "
                         + $"-> Futile.isOpenGL will be {SystemInfo.graphicsDeviceVersion.Contains("OpenGL")}");
             ProbeNative();
@@ -483,8 +481,7 @@ namespace TrueResolution
             // MipmapBox explicitly to force it on regardless.
             const float MipThreshold = 1.5f;
             bool want = Downsampling == DownsampleMode.MipmapBox
-                        || (Downsampling == DownsampleMode.Auto && SmoothDownsample
-                            && ratio >= MipThreshold);
+                        || (Downsampling == DownsampleMode.Auto && ratio >= MipThreshold);
 
             if (!want)
             {
@@ -557,7 +554,7 @@ namespace TrueResolution
             if (bbW <= 0 || bbH <= 0 || rtW <= 0 || rtH <= 0) return;
 
             FilterMode want;
-            if (!SmoothDownsample || Downsampling == DownsampleMode.Point)
+            if (Downsampling == DownsampleMode.Point)
             {
                 want = FilterMode.Point;
             }
