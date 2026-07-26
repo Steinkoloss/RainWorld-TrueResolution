@@ -10,6 +10,20 @@ do not.
 csproj reads `$(Version)` out of it, and `tools/check-metadata.py` asserts that
 `src/Plugin.cs` and this file match.
 
+## 1.3.1
+
+### Fixed
+- `Downsample = Auto` enabled the mip chain on *any* minification, including
+  ratios barely above 1:1, where it is a net loss. Trilinear blends `log2(ratio)`
+  of a half-resolution level into the result, so at 1.07x — exactly the default
+  `Supersample = 2` on a 1440p screen — it paid ~10% of a half-res blur to
+  suppress aliasing that a 4-tap bilinear was already handling. Auto now requires
+  at least 1.5x minification, on the reasoning that a bilinear tap covers a 2x2
+  texel neighbourhood and so stops covering the footprint as the ratio nears 2.
+  `MipmapBox` still forces it on.
+- Consequence: at the default `Supersample = 2` the mip chain is now inert on
+  every common display, which is correct — it only earns its keep at 3 and above.
+
 ## 1.3.0
 
 ### Added

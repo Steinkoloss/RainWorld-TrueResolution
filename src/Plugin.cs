@@ -43,7 +43,7 @@ namespace TrueResolution
     {
         public const string PluginGuid = "steinkoloss.trueresolution";
         public const string PluginName = "True Resolution";
-        public const string PluginVersion = "1.3.0";
+        public const string PluginVersion = "1.3.1";
 
         internal static ManualLogSource Log;
 
@@ -74,6 +74,7 @@ namespace TrueResolution
         /// <summary>Remembers the requested scale we already warned about, so the log stays readable.</summary>
         private static int loggedClampOf = -1;
         private static int loggedCostOf = -1;
+        private static bool loggedMipDecline;
 
         private bool hooksApplied;
 
@@ -203,8 +204,11 @@ namespace TrueResolution
             cfgDownsample = Config.Bind(
                 "Rendering", "Downsample", DownsampleMode.Auto,
                 "Filter used to get the supersampled render texture down to your screen.\n"
-                + "Auto (recommended): MipmapBox whenever the render texture is larger than the "
-                + "backbuffer, plain bilinear otherwise.\n"
+                + "Auto (recommended): MipmapBox once the render texture is at least 1.5x the backbuffer, "
+                + "plain bilinear below that. The threshold exists because mipmapping buys freedom from "
+                + "aliasing and pays in sharpness - near 1:1 that is a net loss, since trilinear blends "
+                + "part of a half-resolution level in to suppress aliasing bilinear was already "
+                + "handling.\n"
                 + "MipmapBox: give the render texture a mip chain and sample it trilinearly. The GPU "
                 + "builds a box-filtered pyramid, so every source pixel contributes instead of just the "
                 + "nearest four. This is the meaningful win at Supersample 3+, where a single bilinear "
@@ -466,11 +470,34 @@ namespace TrueResolution
             RenderTexture rt = self?.renderTexture;
             if (rt == null || renderTextureProp == null) return;
 
-            bool minifying = rt.width > Screen.width || rt.height > Screen.height;
-            bool want = Downsampling == DownsampleMode.MipmapBox
-                        || (Downsampling == DownsampleMode.Auto && SmoothDownsample && minifying);
+            // How much minification the composite actually needs, per axis.
+            float ratio = Mathf.Max((float)rt.width / Mathf.Max(1, Screen.width),
+                                    (float)rt.height / Mathf.Max(1, Screen.height));
 
-            if (!want || rt.useMipMap) return;
+            // Mipmapping buys freedom from aliasing and pays for it in sharpness, and close to 1:1 that
+            // trade is a net loss: trilinear blends log2(ratio) of a HALF-resolution level into the
+            // result, so at ratio 1.07 - which is exactly the default Supersample 2 on a 1440p screen -
+            // you would take ~10% of a half-res blur to suppress aliasing a 4-tap bilinear was already
+            // handling. A bilinear tap covers a 2x2 texel neighbourhood, so it stops covering the
+            // footprint as the ratio approaches 2; 1.5 is a conservative switch-over point. Choose
+            // MipmapBox explicitly to force it on regardless.
+            const float MipThreshold = 1.5f;
+            bool want = Downsampling == DownsampleMode.MipmapBox
+                        || (Downsampling == DownsampleMode.Auto && SmoothDownsample
+                            && ratio >= MipThreshold);
+
+            if (!want)
+            {
+                if (Downsampling == DownsampleMode.Auto && ratio > 1f && !loggedMipDecline)
+                {
+                    loggedMipDecline = true;
+                    Log.LogInfo($"downsample: ratio {ratio:F2}x is below the {MipThreshold:F1}x threshold, "
+                                + "so plain bilinear is sharper than a mip chain here. Set "
+                                + "Downsample=MipmapBox to override.");
+                }
+                return;
+            }
+            if (rt.useMipMap) return;
 
             MethodInfo setter = renderTextureProp.GetSetMethod(true);
             if (setter == null) return;
@@ -509,7 +536,7 @@ namespace TrueResolution
             UnityEngine.Object.Destroy(rt);
 
             Log.LogInfo($"downsample: mip chain enabled on the {next.width}x{next.height} render texture "
-                        + "(trilinear box pyramid)");
+                        + $"(trilinear box pyramid, {ratio:F2}x minification)");
         }
 
         /// <summary>
