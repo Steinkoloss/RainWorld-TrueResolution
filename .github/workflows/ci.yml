@@ -121,7 +121,11 @@ jobs:
           $code = $LASTEXITCODE
           $out | Write-Host
           if ($code -ne 1) { Write-Error "expected exit 1, got $code"; exit 1 }
-          if ($out -notmatch 'Could not find Rain World') {
+          # $out is an ARRAY of output lines, and on an array -match/-notmatch FILTER rather than
+          # test: "$out -notmatch 'x'" evaluates to every line that does not match, which is
+          # almost always a non-empty - therefore truthy - array. Flatten before testing.
+          $text = $out | Out-String
+          if ($text -notmatch 'Could not find Rain World') {
             Write-Error 'missing the actionable not-found message'; exit 1
           }
           Write-Host 'not-found path behaves'

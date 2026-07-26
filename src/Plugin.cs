@@ -446,7 +446,7 @@ namespace TrueResolution
                             + $"(logical {self.pixelWidth}x{self.pixelHeight}, {self.renderScale}x supersampled)");
             }
 
-            EnsureMipChain(self);
+            ConformRenderTexture(self);
             ApplyFilterMode(self);
         }
 
@@ -463,59 +463,55 @@ namespace TrueResolution
         /// RenderTexture, so the only way in is to allocate a replacement and rebind the three things that
         /// reference it: both Futile cameras' targetTexture and the presenting RawImage.
         /// </summary>
-        private static void EnsureMipChain(FScreen self)
+        private static void ConformRenderTexture(FScreen self)
         {
             RenderTexture rt = self?.renderTexture;
             if (rt == null || renderTextureProp == null) return;
 
-            // How much minification the composite actually needs, per axis.
-            float ratio = Mathf.Max((float)rt.width / Mathf.Max(1, Screen.width),
-                                    (float)rt.height / Mathf.Max(1, Screen.height));
+            int wantW, wantH;
+            DesiredRTSize(self, out wantW, out wantH);
+
+            float ratio = Mathf.Max((float)wantW / Mathf.Max(1, Screen.width),
+                                    (float)wantH / Mathf.Max(1, Screen.height));
 
             // Mipmapping buys freedom from aliasing and pays for it in sharpness, and close to 1:1 that
             // trade is a net loss: trilinear blends log2(ratio) of a HALF-resolution level into the
-            // result, so at ratio 1.07 - which is exactly the default Supersample 2 on a 1440p screen -
-            // you would take ~10% of a half-res blur to suppress aliasing a 4-tap bilinear was already
-            // handling. A bilinear tap covers a 2x2 texel neighbourhood, so it stops covering the
-            // footprint as the ratio approaches 2; 1.5 is a conservative switch-over point. Choose
-            // MipmapBox explicitly to force it on regardless.
+            // result. A bilinear tap covers a 2x2 texel neighbourhood, so it stops covering the footprint
+            // as the ratio approaches 2; 1.5 is a conservative switch-over. MipmapBox forces it on.
             const float MipThreshold = 1.5f;
-            bool want = Downsampling == DownsampleMode.MipmapBox
-                        || (Downsampling == DownsampleMode.Auto && ratio >= MipThreshold);
+            bool wantMips = Downsampling == DownsampleMode.MipmapBox
+                            || (Downsampling == DownsampleMode.Auto && ratio >= MipThreshold);
 
-            if (!want)
+            if (rt.width == wantW && rt.height == wantH && rt.useMipMap == wantMips)
             {
-                if (Downsampling == DownsampleMode.Auto && ratio > 1f && !loggedMipDecline)
+                if (Downsampling == DownsampleMode.Auto && !wantMips && ratio > 1f && !loggedMipDecline)
                 {
                     loggedMipDecline = true;
                     Log.LogInfo($"downsample: ratio {ratio:F2}x is below the {MipThreshold:F1}x threshold, "
-                                + "so plain bilinear is sharper than a mip chain here. Set "
-                                + "Downsample=MipmapBox to override.");
+                                + "so plain bilinear is sharper than a mip chain here.");
                 }
                 return;
             }
-            if (rt.useMipMap) return;
 
             MethodInfo setter = renderTextureProp.GetSetMethod(true);
             if (setter == null) return;
 
-            RenderTexture next = new RenderTexture(rt.width, rt.height, 0, rt.format,
+            RenderTexture next = new RenderTexture(wantW, wantH, 0, rt.format,
                                                    RenderTextureReadWrite.Default)
             {
-                name = "TrueResolution_MipRT",
-                useMipMap = true,
-                autoGenerateMips = true,          // regenerated after the camera renders into it
+                name = "TrueResolution_RT",
+                useMipMap = wantMips,
+                autoGenerateMips = wantMips,      // regenerated after the camera renders into it
                 antiAliasing = 1,
                 wrapMode = rt.wrapMode,
-                filterMode = FilterMode.Trilinear
+                filterMode = wantMips ? FilterMode.Trilinear : rt.filterMode
             };
 
             if (!next.Create())
             {
-                // Do not leave a dead texture behind; keep the game's working one.
                 UnityEngine.Object.Destroy(next);
-                Log.LogWarning($"could not create a {rt.width}x{rt.height} mipmapped render texture; "
-                               + "keeping bilinear downsampling.");
+                Log.LogWarning($"could not create a {wantW}x{wantH} render texture; keeping the "
+                               + $"existing {rt.width}x{rt.height} one.");
                 return;
             }
 
@@ -532,8 +528,39 @@ namespace TrueResolution
             rt.Release();
             UnityEngine.Object.Destroy(rt);
 
-            Log.LogInfo($"downsample: mip chain enabled on the {next.width}x{next.height} render texture "
-                        + $"(trilinear box pyramid, {ratio:F2}x minification)");
+            Log.LogInfo($"render target: {next.width}x{next.height}"
+                        + (NativeRT ? " (native, 1:1 with the backbuffer)" : "")
+                        + $"  ratio {ratio:F2}x"
+                        + (wantMips ? "  mip chain on" : ""));
+        }
+
+        /// <summary>
+        /// How big the render texture should be.
+        ///
+        /// Normally pixelWidth/Height times the integer renderScale. In Native mode it is the backbuffer
+        /// size exactly, which is legal for the same reason supersampling is: the Futile camera's
+        /// orthographicSize comes from pixelHeight and never from the render texture, so the world
+        /// framing does not move. That gives a 1:1 composite with no resampling at all, at a fraction of
+        /// the fill cost. (camera.aspect is derived from the target's dimensions, so the visible world
+        /// width shifts by the difference between the logical and display aspect ratios - 1366/768 vs
+        /// 16:9 is 0.05%, i.e. under a single world unit.)
+        /// </summary>
+        private static void DesiredRTSize(FScreen self, out int w, out int h)
+        {
+            if (NativeRT && Screen.width > 0 && Screen.height > 0)
+            {
+                w = Screen.width;
+                h = Screen.height;
+            }
+            else
+            {
+                w = self.pixelWidth * Mathf.Max(1, self.renderScale);
+                h = self.pixelHeight * Mathf.Max(1, self.renderScale);
+            }
+
+            int max = SystemInfo.maxTextureSize > 0 ? SystemInfo.maxTextureSize : 8192;
+            w = Mathf.Clamp(w, 1, max);
+            h = Mathf.Clamp(h, 1, max);
         }
 
         /// <summary>
