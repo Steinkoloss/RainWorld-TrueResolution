@@ -6,6 +6,22 @@ using UnityEngine.UI;
 
 namespace TrueResolution
 {
+    /// <summary>Filter used to bring the supersampled render texture down to the backbuffer.</summary>
+    internal enum DownsampleMode
+    {
+        /// <summary>MipmapBox while minifying, Bilinear otherwise. Recommended.</summary>
+        Auto = 0,
+
+        /// <summary>Mip chain + trilinear: a box-filtered pyramid. Best available without a shader.</summary>
+        MipmapBox = 1,
+
+        /// <summary>A single 4-tap bilinear sample.</summary>
+        Bilinear = 2,
+
+        /// <summary>Nearest neighbour.</summary>
+        Point = 3
+    }
+
     /// <summary>How the (at most 1366x768, ~16:9) logical picture is fitted into the backbuffer.</summary>
     internal enum AspectMode
     {
@@ -137,6 +153,18 @@ namespace TrueResolution
             resolveFailed = false; pictureValid = false;
             lastBackbufferW = lastBackbufferH = 0;
             lastFx = lastFy = -1f;
+        }
+
+        /// <summary>
+        /// Repoint the presenting RawImage at a different render texture, used when the render target is
+        /// swapped for a mipmapped one. Presentation owns the RawImage reference, so it owns the rebind.
+        /// A no-op before Futile.Init has produced the RawImage, which is harmless: Futile.Init
+        /// (Futile.cs:222) and UpdateScreenWidth (Futile.cs:283) assign the texture themselves.
+        /// </summary>
+        internal static void RebindTexture(RenderTexture rt)
+        {
+            if (!Resolve()) return;
+            if (image != null) image.texture = rt;
         }
 
         // ------------------------------------------------------------------ resolve

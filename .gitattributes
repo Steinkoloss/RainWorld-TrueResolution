@@ -1,0 +1,34 @@
+# Normalise line endings in the repository, and pin them per file type on
+# checkout. This is not cosmetic: Git for Windows defaults to
+# core.autocrlf=true, which rewrites every text file to CRLF on checkout. A
+# CRLF install.sh run under Git Bash or WSL fails with
+#   bash: install.sh: /usr/bin/env^M: bad interpreter
+# and a CRLF shell script inside a GitHub Actions ubuntu runner fails the same
+# way. Most Rain World players are on Windows, so this file is what keeps the
+# Linux/macOS path working for a contributor who cloned on Windows.
+
+*               text=auto eol=lf
+
+# Must stay LF regardless of platform: interpreted by bash or by a Linux runner.
+*.sh            text eol=lf
+*.py            text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+
+# Must be CRLF: PowerShell 5.1, which is what ships with Windows and what most
+# users will run install.ps1 under, mis-parses some multi-line constructs when
+# the file is LF-only and saved without a BOM.
+*.ps1           text eol=crlf
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
+
+# Never touched.
+*.png           binary
+*.jpg           binary
+*.dll           binary
+*.pdb           binary
+*.zip           binary
+
+# Keep generated/vendored noise out of diffs and out of the language stats.
+refs/**         binary linguist-vendored
+CHANGELOG.md    merge=union

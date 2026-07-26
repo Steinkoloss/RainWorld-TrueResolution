@@ -11,8 +11,8 @@ body:
            loads its own `winhttp.dll` and ignores the BepInEx shim in the game
            folder. Nothing loads, silently. Fix: Steam → Rain World → Properties
            → Launch Options → `WINEDLLOVERRIDES="winhttp=n,b" %command%`
-        2. **Not enabled in Remix.** Main menu → Remix → enable **Resolution
-           Fix** → Apply → restart. Also required again after any game update,
+        2. **Not enabled in Remix.** Main menu → Remix → enable **True
+           Resolution** → Apply → restart. Also required again after any game update,
            because the loader blanks the enabled list when the game version
            changes.
 

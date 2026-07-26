@@ -97,8 +97,10 @@ Not published. To publish:
     tools/release.sh --publish
 
 Then, for the two distribution channels (see docs/RELEASING.md):
-  Steam Workshop  in-game: Remix -> select the mod -> UPLOAD. There is no
-                  command-line path; the game does it via SteamUGC.
+  Steam Workshop  in-game: Remix -> select the mod -> UPLOAD. Do it from the
+                  game, not steamcmd: only the game writes the 'id' and
+                  'version' key-value tags that identify the item on re-upload
+                  and that RainDB reads.
   RainDB          nothing to do. It mirrors the Workshop; publishing there is
                   the submission.
 EOF

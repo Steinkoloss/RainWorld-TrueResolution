@@ -40,8 +40,9 @@ Rain World\
         └── mods\
             ├── moreslugcats\          <- already there, leave it alone
             ├── dlc-shared\            <- already there, leave it alone
-            └── trueresolution\         <- NEW, from the zip
+            └── trueresolution\        <- NEW, from the zip
                 ├── modinfo.json
+                ├── thumbnail.png
                 └── plugins\
                     └── TrueResolution.dll
 ```

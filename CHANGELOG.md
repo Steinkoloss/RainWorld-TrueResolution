@@ -10,6 +10,50 @@ do not.
 csproj reads `$(Version)` out of it, and `tools/check-metadata.py` asserts that
 `src/Plugin.cs` and this file match.
 
+## 1.2.0
+
+### Added
+- `Downsample` option, default `Auto`. Gives the render texture a mip chain and
+  samples it trilinearly whenever it is larger than the backbuffer, so the GPU
+  builds a box-filtered pyramid and every source pixel contributes instead of
+  only the nearest four. This is the best downsample obtainable without shipping
+  a custom shader — Unity cannot compile ShaderLab at runtime, so a
+  Lanczos/Mitchell kernel would require an AssetBundle built in the editor, and
+  for pure minification a box pyramid is close to optimal anyway. `useMipMap`
+  can only be set before a texture is created, so the render target is
+  reallocated and the three references to it (both Futile cameras'
+  `targetTexture` and the presenting `RawImage`) are rebound.
+  Modes: `Auto`, `MipmapBox`, `Bilinear`, `Point`.
+- `Supersample` now accepts up to 8 (was 4). Clamped automatically so the render
+  texture stays inside `SystemInfo.maxTextureSize`, because an oversized
+  `Create()` fails silently and yields a black screen. Warns above 4 with the
+  actual megapixel and memory cost.
+
+### Changed
+- Point filtering is still chosen for a 1:1 or exact-integer composite, where it
+  is genuinely sharpest and a mip chain would only blur. Trilinear is only
+  requested when mips actually exist, since Unity otherwise silently treats it
+  as bilinear.
+
+### Not done: FSR 4 / DLSS 4
+Investigated and rejected on four independent grounds, recorded here so it is
+not re-litigated:
+- The game renders on **D3D11**; FSR 4 is a D3D12 implementation reached through
+  AMD's `amdxcffx64.dll`. There is no D3D11 entry point.
+- FSR 4 and DLSS 2+ are **temporal**. They require per-pixel motion vectors;
+  `motionVector` appears nowhere in the assembly, the presented render texture is
+  allocated with **zero depth bits**, and the camera is orthographic 2D.
+  Synthesising motion vectors would mean replicating the vertex animation of
+  ~300 shaders in a second pass.
+- Rain World's camera **hard-cuts** between fixed per-room positions, the
+  worst-case input for a temporal accumulator.
+- The payoff would be negative: temporal upscalers recover sub-pixel detail by
+  accumulating jittered samples, and a pixel-locked 2D game sampling fixed
+  1400×800 art has none to recover. Expect ghosting, gain nothing.
+
+DLSS additionally requires an NVIDIA GPU. FSR 1 remains theoretically viable —
+it is purely spatial — but needs a shader shipped in an AssetBundle.
+
 ## 1.1.0
 
 First public release. 1.0.0 and 1.0.1 below were built and runtime-verified

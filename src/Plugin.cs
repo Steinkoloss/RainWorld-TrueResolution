@@ -43,7 +43,7 @@ namespace TrueResolution
     {
         public const string PluginGuid = "steinkoloss.trueresolution";
         public const string PluginName = "True Resolution";
-        public const string PluginVersion = "1.1.0";
+        public const string PluginVersion = "1.2.0";
 
         internal static ManualLogSource Log;
 
@@ -54,6 +54,7 @@ namespace TrueResolution
         private ConfigEntry<bool> cfgSmoothDownsample;
         private ConfigEntry<bool> cfgLegacyScreenOffset;
         private ConfigEntry<AspectMode> cfgAspectMode;
+        private ConfigEntry<DownsampleMode> cfgDownsample;
 
         /// <summary>Cached private setter for FScreen.renderScale (auto-property with a private set).</summary>
         private static PropertyInfo renderScaleProp;
@@ -65,6 +66,14 @@ namespace TrueResolution
         private static int DesiredScale = 2;
         private static bool SmoothDownsample = true;
         private static bool LegacyScreenOffset;
+        private static DownsampleMode Downsampling = DownsampleMode.Auto;
+
+        /// <summary>Setter for FScreen.renderTexture, which is an auto-property with a private set.</summary>
+        private static PropertyInfo renderTextureProp;
+
+        /// <summary>Remembers the requested scale we already warned about, so the log stays readable.</summary>
+        private static int loggedClampOf = -1;
+        private static int loggedCostOf = -1;
 
         private bool hooksApplied;
 
@@ -95,11 +104,16 @@ namespace TrueResolution
                 new ConfigDescription(
                     "Internal render scale. The game renders the same view at this multiple of its "
                     + "internal 768-pixel-tall buffer (1024-1366 wide depending on the aspect-ratio "
-                    + "option), then it is filtered down to your screen. 2 is the sweet spot. "
-                    + "3 and 4 are GPU headroom only - Rain World's renderer is fill-bound and uses "
-                    + "100+ GrabPasses, so the cost scales with the square of this value. "
-                    + "1 disables supersampling.",
-                    new AcceptableValueRange<int>(1, 4)));
+                    + "option), then it is filtered down to your screen. 2 is the sweet spot.\n"
+                    + "Cost scales with the SQUARE of this value and Rain World's renderer is "
+                    + "fill-bound with 100+ GrabPasses, each of which copies the whole target - so 4 is "
+                    + "roughly 4x the fill cost of 2, and 8 is 16x. Returns diminish fast because room "
+                    + "terrain is a fixed 1400x800 image per screen and cannot gain detail; only the "
+                    + "procedurally drawn art (creatures, rain, water, HUD, text) keeps improving.\n"
+                    + "Values above 4 are there to be experimented with, not recommended. The scale is "
+                    + "automatically clamped so the render texture stays within the GPU's maximum "
+                    + "texture size. 1 disables supersampling.",
+                    new AcceptableValueRange<int>(1, 8)));
 
             cfgNativeBackbuffer = Config.Bind(
                 "Rendering", "NativeBackbuffer", true,
@@ -121,6 +135,19 @@ namespace TrueResolution
                 "Filter the render texture when it is not composited pixel-exactly onto the backbuffer. "
                 + "Turn this off only if you want a hard pixelated look (it will alias badly).");
 
+            cfgDownsample = Config.Bind(
+                "Rendering", "Downsample", DownsampleMode.Auto,
+                "Filter used to get the supersampled render texture down to your screen.\n"
+                + "Auto (recommended): MipmapBox whenever the render texture is larger than the "
+                + "backbuffer, plain bilinear otherwise.\n"
+                + "MipmapBox: give the render texture a mip chain and sample it trilinearly. The GPU "
+                + "builds a box-filtered pyramid, so every source pixel contributes instead of just the "
+                + "nearest four. This is the meaningful win at Supersample 3+, where a single bilinear "
+                + "tap undersamples badly and shimmers; at Supersample 2 on a 1440p screen the ratio is "
+                + "only 1.07 so trilinear stays on mip 0 and it changes almost nothing.\n"
+                + "Bilinear: one 4-tap sample, the previous behaviour.\n"
+                + "Point: nearest neighbour. Aliases hard unless the ratio is exactly 1:1 or integer.");
+
             cfgLegacyScreenOffset = Config.Bind(
                 "Compatibility", "LegacyScreenOffset", false,
                 "Diagnostic A/B switch. Raising renderScale above 1 moves FScreen.UpdateScreenOffset onto "
@@ -140,15 +167,18 @@ namespace TrueResolution
                 + "rescale. Only use this if Letterbox misbehaves.\n"
                 + "Stretch: vanilla behaviour. The picture is distorted on any non-16:9 display.");
 
-            DesiredScale = Mathf.Clamp(cfgSupersample.Value, 1, 4);
+            DesiredScale = Mathf.Clamp(cfgSupersample.Value, 1, 8);
             SmoothDownsample = cfgSmoothDownsample.Value;
             LegacyScreenOffset = cfgLegacyScreenOffset.Value;
+            Downsampling = cfgDownsample.Value;
             Presentation.Mode = cfgAspectMode.Value;
 
             renderScaleProp = typeof(FScreen).GetProperty(
                 "renderScale", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
             renderScaleField = typeof(FScreen).GetField(
                 "<renderScale>k__BackingField", BindingFlags.Instance | BindingFlags.NonPublic);
+            renderTextureProp = typeof(FScreen).GetProperty(
+                "renderTexture", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
             On.FScreen.ctor += FScreen_ctor;
             On.FScreen.ReinitRenderTexture += FScreen_ReinitRenderTexture;
@@ -275,17 +305,56 @@ namespace TrueResolution
         /// (FScreen.UpdateScreenOffset) is recomputed exactly the way the game expects, and so other
         /// mods' ReinitRenderTexture postfixes still run.
         /// </summary>
+        /// <summary>
+        /// The scale we can actually afford to allocate. A 1366x768 logical screen at 8x is 10928x6144,
+        /// which is inside D3D11's 16384 limit but not inside every GPU's, and asking for a render texture
+        /// past <see cref="SystemInfo.maxTextureSize"/> gets you a silently-failed Create() and a black
+        /// screen. Clamp instead, and say so once.
+        /// </summary>
+        private static int EffectiveScale(FScreen self)
+        {
+            int want = Mathf.Clamp(DesiredScale, 1, 8);
+            int pw = Mathf.Max(1, self.pixelWidth), ph = Mathf.Max(1, self.pixelHeight);
+
+            int maxDim = SystemInfo.maxTextureSize;
+            if (maxDim <= 0) maxDim = 8192;                 // unknown driver: assume the D3D10 floor
+            int cap = Mathf.Max(1, Mathf.Min(maxDim / pw, maxDim / ph));
+
+            int eff = Mathf.Clamp(want, 1, cap);
+            if (eff != want && loggedClampOf != want)
+            {
+                loggedClampOf = want;
+                Log.LogWarning($"Supersample {want} would need a {pw * want}x{ph * want} render texture, "
+                               + $"past this GPU's {maxDim}px limit. Clamped to {eff} "
+                               + $"({pw * eff}x{ph * eff}).");
+            }
+
+            if (eff >= 4 && loggedCostOf != eff)
+            {
+                loggedCostOf = eff;
+                long px = (long)pw * eff * ph * eff;
+                Log.LogWarning($"Supersample {eff} renders {px / 1000000f:F1} megapixels per frame "
+                               + $"(~{px * 4L / 1048576L} MB for the target alone), {eff * eff / 4f:F1}x the "
+                               + "fill cost of the default 2. Rain World is fill-bound with 100+ GrabPasses; "
+                               + "expect a large framerate drop for very little visible gain, since room "
+                               + "terrain is fixed 1400x800 art.");
+            }
+            return eff;
+        }
+
         private static void EnsureRenderScale(FScreen self)
         {
             if (self == null || rebuilding) return;
 
-            if (self.renderScale != DesiredScale)
+            int target = EffectiveScale(self);
+
+            if (self.renderScale != target)
             {
-                SetRenderScale(self, DesiredScale);
-                if (self.renderScale != DesiredScale)
+                SetRenderScale(self, target);
+                if (self.renderScale != target)
                 {
                     Log.LogError($"renderScale is still {self.renderScale} after trying to set "
-                                 + $"{DesiredScale} - reflection failed, supersampling is OFF.");
+                                 + $"{target} - reflection failed, supersampling is OFF.");
                     return;
                 }
 
@@ -305,7 +374,72 @@ namespace TrueResolution
                             + $"(logical {self.pixelWidth}x{self.pixelHeight}, {self.renderScale}x supersampled)");
             }
 
+            EnsureMipChain(self);
             ApplyFilterMode(self);
+        }
+
+        /// <summary>
+        /// Gives the render texture a mip chain, which is the best downsample available without shipping a
+        /// custom shader (Unity cannot compile ShaderLab at runtime, so a Lanczos/Mitchell kernel would
+        /// need an AssetBundle built in the editor).
+        ///
+        /// The GPU builds a box-filtered pyramid and trilinear sampling blends the two bracketing levels,
+        /// so at large ratios every source pixel contributes instead of only the nearest four. For pure
+        /// minification a box pyramid is close to optimal - Lanczos mainly wins when magnifying.
+        ///
+        /// useMipMap can only be set before the texture is created and the game news up a plain
+        /// RenderTexture, so the only way in is to allocate a replacement and rebind the three things that
+        /// reference it: both Futile cameras' targetTexture and the presenting RawImage.
+        /// </summary>
+        private static void EnsureMipChain(FScreen self)
+        {
+            RenderTexture rt = self?.renderTexture;
+            if (rt == null || renderTextureProp == null) return;
+
+            bool minifying = rt.width > Screen.width || rt.height > Screen.height;
+            bool want = Downsampling == DownsampleMode.MipmapBox
+                        || (Downsampling == DownsampleMode.Auto && SmoothDownsample && minifying);
+
+            if (!want || rt.useMipMap) return;
+
+            MethodInfo setter = renderTextureProp.GetSetMethod(true);
+            if (setter == null) return;
+
+            RenderTexture next = new RenderTexture(rt.width, rt.height, 0, rt.format,
+                                                   RenderTextureReadWrite.Default)
+            {
+                name = "TrueResolution_MipRT",
+                useMipMap = true,
+                autoGenerateMips = true,          // regenerated after the camera renders into it
+                antiAliasing = 1,
+                wrapMode = rt.wrapMode,
+                filterMode = FilterMode.Trilinear
+            };
+
+            if (!next.Create())
+            {
+                // Do not leave a dead texture behind; keep the game's working one.
+                UnityEngine.Object.Destroy(next);
+                Log.LogWarning($"could not create a {rt.width}x{rt.height} mipmapped render texture; "
+                               + "keeping bilinear downsampling.");
+                return;
+            }
+
+            setter.Invoke(self, new object[] { next });
+
+            Futile f = Futile.instance;
+            if (f != null)
+            {
+                if (f.camera != null) f.camera.targetTexture = next;
+                if (f.camera2 != null) f.camera2.targetTexture = next;   // JollyCoop split-screen
+                Presentation.RebindTexture(next);
+            }
+
+            rt.Release();
+            UnityEngine.Object.Destroy(rt);
+
+            Log.LogInfo($"downsample: mip chain enabled on the {next.width}x{next.height} render texture "
+                        + "(trilinear box pyramid)");
         }
 
         /// <summary>
@@ -326,7 +460,7 @@ namespace TrueResolution
             if (bbW <= 0 || bbH <= 0 || rtW <= 0 || rtH <= 0) return;
 
             FilterMode want;
-            if (!SmoothDownsample)
+            if (!SmoothDownsample || Downsampling == DownsampleMode.Point)
             {
                 want = FilterMode.Point;
             }
@@ -337,7 +471,19 @@ namespace TrueResolution
                                   && rtW <= bbW && rtH <= bbH
                                   && bbW % rtW == 0 && bbH % rtH == 0
                                   && (bbW / rtW) == (bbH / rtH);
-                want = (oneToOne || intUpscale) ? FilterMode.Point : FilterMode.Bilinear;
+
+                if (oneToOne || intUpscale)
+                {
+                    // Pixel-exact or an exact integer magnification: nearest neighbour is the correct,
+                    // sharpest choice and a mip chain would only ever blur it.
+                    want = FilterMode.Point;
+                }
+                else
+                {
+                    // Trilinear is only meaningful with mips present; without them Unity treats it as
+                    // bilinear anyway, so asking for it unconditionally would be misleading in the log.
+                    want = rt.useMipMap ? FilterMode.Trilinear : FilterMode.Bilinear;
+                }
             }
 
             if (rt.filterMode != want) rt.filterMode = want;

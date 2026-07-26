@@ -138,6 +138,67 @@ if plugin_cs.is_file():
             note(f"README.md does not mention {guid}.cfg, the config file "
                  "BepInEx will create from PluginGuid.")
 
+# ================================================================ name drift
+# The display name and the id appear in prose in a dozen files, and a rename
+# leaves survivors behind - especially where hard wrapping splits the name
+# across two lines, which is invisible to a plain `grep "Old Name"`. Collapsing
+# whitespace before searching is the entire trick.
+#
+# Add every name this mod has ever shipped under. Each is a hard failure: Remix
+# lists mod/modinfo.json's "name" verbatim, so a user told to enable "Old Name"
+# will not find it.
+FORMER_IDENTIFIERS = [
+    "Resolution Fix",
+    "resolutionfix",
+    "RainWorldResolutionFix",
+    "jaimep.resolutionfix",
+]
+
+display_name = info.get("name", "")
+
+# Where the mod is named *to a user*. Each of these must use the current name.
+USER_FACING = [
+    "README.md",
+    "install.sh",
+    "install.ps1",
+    ".github/ISSUE_TEMPLATE/bug_report.yml",
+]
+
+TEXT_SUFFIXES = {".md", ".yml", ".yaml", ".json", ".sh", ".ps1", ".py", ".cs",
+                 ".csproj", ".props", ".targets", ".config"}
+SKIP_DIRS = {".git", "bin", "obj", "refs", ".tools", ".vs", ".idea"}
+
+for path in sorted(ROOT.rglob("*")):
+    if not path.is_file() or path.suffix not in TEXT_SUFFIXES:
+        continue
+    rel = path.relative_to(ROOT)
+    if any(part in SKIP_DIRS for part in rel.parts):
+        continue
+    # Past CHANGELOG entries may legitimately record the old name, and this
+    # file has to spell the old names out to look for them.
+    if path.name in {"CHANGELOG.md", Path(__file__).name}:
+        continue
+    try:
+        flat = re.sub(r"\s+", " ", path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, OSError):
+        continue
+    for stale in FORMER_IDENTIFIERS:
+        if stale.lower() in flat.lower():
+            fail(f"{rel} still refers to {stale!r}; the mod is now "
+                 f"{display_name!r} / id {mod_id!r}. Remix lists "
+                 "modinfo.json's 'name' verbatim, so an instruction naming the "
+                 "old one sends users hunting for a mod that is not there.")
+
+for rel in USER_FACING:
+    path = ROOT / rel
+    if not path.is_file():
+        note(f"{rel} is missing.")
+        continue
+    flat = re.sub(r"\s+", " ", path.read_text(encoding="utf-8"))
+    if display_name and display_name not in flat:
+        fail(f"{rel} never names the mod {display_name!r}. That is the string "
+             "Remix shows, so it is the only name a user can search for.")
+
 changelog = ROOT / "CHANGELOG.md"
 if changelog.is_file():
     if not re.search(rf"^##\s*\[?{re.escape(version)}\]?", changelog.read_text(encoding="utf-8"), re.M):

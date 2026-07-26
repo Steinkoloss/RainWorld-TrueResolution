@@ -75,6 +75,18 @@
 
     <Message Importance="high" Text="Rain World references resolved from: $(RainWorldDir)" />
 
+    <!-- A generated reference root wins over a real install (see the resolution
+         order in RainWorld.props), which is what makes CI work but also means a
+         refs/ tree left over from an older game version is used silently. Echo
+         what it was generated from so a stale one is visible in every build log,
+         local or CI. GAME_VERSION.txt is written by tools/make-refs.sh. -->
+    <ReadLinesFromFile File="$(RainWorldDir)/GAME_VERSION.txt"
+                       Condition="Exists('$(RainWorldDir)/GAME_VERSION.txt')">
+      <Output TaskParameter="Lines" ItemName="_RwRefsProvenance" />
+    </ReadLinesFromFile>
+    <Message Importance="high" Condition="'@(_RwRefsProvenance)' != ''"
+             Text="  reference assemblies, not a game install: @(_RwRefsProvenance->'%(Identity)', ' | ')%0A  If that game version is not the one you are targeting, re-run tools/make-refs.sh." />
+
     <!-- =========================================== expand @(RwGameReference)
          Private=false throughout: the game supplies every one of these at
          runtime, and shipping a second copy beside the plugin causes duplicate

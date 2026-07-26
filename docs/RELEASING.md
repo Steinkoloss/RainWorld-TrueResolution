@@ -39,21 +39,37 @@ package.
 
 ## What other Rain World repos do
 
-Nothing. Checked for `.github/workflows` in: `PJB3005/RainWorldMods`,
-`SlimeCubed/VoxelWorld`, `SlimeCubed/DevInterface`, `NoirCatto/BeastMaster`,
-`NoirCatto/RideableLizards`, `alduris/FCAP`, `alduris/id-finder`,
-`OlayColay/TheVinki`, `metnias/CompletelyOptional`, `iwantBottles/rw-mod-template`,
-`EtiTheSpirit/DreamsOfInfiniteGlass`, `ASlightlyOvergrownCactus/ASCII-World`,
-`TheLazyCowboy1/RainMeadowSyncTemplate`, `LeeMoriya/Inventory`,
-`EdEnStonne/BeyondTheWest`, `FranklyGD/Extended-Collectibles-Tracker`,
-`henpemaz/RainMeadow`, `Gamer025/RainworldCE`, `BigWingBeat/rain-world-mod-template`.
-**Zero of them have any CI.** The ecosystem builds locally and hand-uploads.
+Almost none have CI, and **every one that does works by committing the game's
+DLLs into the repo.** Surveyed via the GitHub code-search API: 365 public repos
+name `HOOKS-Assembly-CSharp` in a `.csproj`, and of the largest and most active
+of those, only five have a `.github/workflows` directory at all.
 
-The one community template that solves the reference problem does it by
-**committing the DLLs**: `BigWingBeat/rain-world-mod-template` has
-`lib/HOOKS-Assembly-CSharp.dll` and `lib/PUBLIC-Assembly-CSharp.dll` in the repo.
-Both are derived from files that ship with the game. That works, and this project
-deliberately does not copy it.
+| Repo | Workflow | How it gets the references |
+|---|---|---|
+| [`Dual-Iron/fisobs`](https://github.com/Dual-Iron/fisobs/blob/main/.github/workflows/build.yml) | `dotnet publish Fisobs.sln` on `ubuntu-latest` | [`lib/`](https://github.com/Dual-Iron/fisobs/tree/main/lib) committed: `HOOKS-Assembly-CSharp.dll` (14.5 MB), `PUBLIC-Assembly-CSharp.dll` (9.0 MB), `Assembly-CSharp-firstpass.dll`, `UnityEngine*.dll`, `BepInEx.dll`, MonoMod, Mono.Cecil |
+| [`Dual-Iron/improved-input-config`](https://github.com/Dual-Iron/improved-input-config/blob/main/.github/workflows/build.yml) | same | `lib/` committed, 16 assemblies incl. `PUBLIC-Assembly-CSharp.dll` (6.7 MB) and `Rewired_Core.dll` |
+| [`SlimeCubed/SlugBaseRemix`](https://github.com/SlimeCubed/SlugBaseRemix/blob/master/.github/workflows/build.yml) | same | `lib/` committed |
+| [`Dragon-Seeker/myriad`](https://github.com/Dragon-Seeker/myriad/blob/master/.github/workflows/build.yml) | same | `lib/` committed |
+| [`rwmoddingch/RandomBuff`](https://github.com/rwmoddingch/RandomBuff/blob/master/.github/workflows/Upload.yml) | **uploads to the Steam Workshop**, does not compile | n/a — ships a prebuilt `mod/` folder |
+
+The csproj in those repos is as simple as this, which is the whole trick:
+
+```xml
+<ItemGroup>
+  <Reference Include="../lib/*.dll"><Private>false</Private></Reference>
+</ItemGroup>
+```
+
+Note that these are not stripped reference assemblies — they are the shipped
+binaries with full IL, and `PUBLIC-Assembly-CSharp.dll` is a publicised copy of
+essentially the entire game's C# code (it ships in `BepInEx/utils/`, produced by
+the bundled `Dragons.PublicDragon.dll` patcher). Committing it is the community
+norm and it is also plainly a redistribution of Videocult's code. This project
+deliberately does not copy that pattern; see the options table below.
+
+The rest of the ecosystem points `HintPath` straight at a local install — 22
+public `.csproj` files hardcode a literal `steamapps/common/Rain World` path —
+and builds and uploads by hand.
 
 ## Options considered
 
@@ -118,12 +134,16 @@ tells you to use `tools/release.sh`.
 
 ## Steam Workshop
 
-**The game is the uploader.** Rain World ships its own Workshop publisher, so
-there is no `.vdf`, no SteamCMD, no `steamcmd +workshop_build_item`, and nothing
-to automate. `SteamWorkshopUploader.cs` drives a state machine
-(`INIT → CHECK_EXISTS → CREATE → ACCEPT_LEGAL → UPLOAD → PREVIEW`) over
-Steamworks' `SteamUGC` API, and `RainWorldSteamManager.cs:237-292` does the
-actual `StartItemUpdate` / `SubmitItemUpdate`.
+**The game is the uploader, and for the first publish it has to be.** Rain World
+ships its own Workshop publisher: `SteamWorkshopUploader.cs` drives a state
+machine (`INIT → CHECK_EXISTS → CREATE → ACCEPT_LEGAL → UPLOAD → PREVIEW`) over
+Steamworks' `SteamUGC`, and `RainWorldSteamManager.cs:237-292` does the actual
+`StartItemUpdate` / `SubmitItemUpdate`.
+
+SteamCMD *can* push content to app 312520 — see the automation subsection at the
+end — but it cannot do the one thing that matters here, which is write the
+Steam **key-value tags** the game and RainDB identify a mod by. Use the in-game
+button.
 
 ### Steps
 
@@ -168,9 +188,53 @@ a second Workshop item, and if someone else already published that `id` the
 upload is refused with *"This mod already exists on the workshop by another
 author."*
 
-**Automatable?** No. The upload path is inside the game process and requires the
-Steam client plus a manual EULA acceptance. Everything *before* it — building,
-packaging, validating the thumbnail — is automated here.
+### Automatable? Partly, and not worth it
+
+The first publish is **not** automatable: `SteamUGC.CreateItem` runs inside the
+game process (`RainWorldSteamManager.cs:216`), the Workshop EULA has to be
+accepted interactively, and the item is created Unlisted
+(`UploadWorkshopMod(mod, newMod)` — `SteamWorkshopUploader.cs:213` passes
+`unlisted = newMod`, so only the *first* upload is forced Unlisted).
+
+Subsequent content updates *can* be automated. There is one real Rain World repo
+doing it: [`rwmoddingch/RandomBuff`](https://github.com/rwmoddingch/RandomBuff/blob/master/.github/workflows/Upload.yml)
+uses [`pkuyo/steam-workshop-upload`](https://github.com/pkuyo/steam-workshop-upload),
+a Docker action that writes a `workshop.vdf` and runs
+`steamcmd +login … +workshop_build_item`, with a Steam Guard `shared_secret` for
+headless 2FA:
+
+```yaml
+- uses: pkuyo/steam-workshop-upload@main
+  with:
+    appid: 312520          # Rain World
+    itemid: ${{ secrets.ITEM_ID }}
+    path: 'mod'
+    visibility: 3          # 3 = private
+  env:
+    STEAM_USERNAME: ${{ secrets.DEPLOY_USERNAME }}
+    STEAM_PASSWORD: ${{ secrets.DEPLOY_PASSWORD }}
+```
+
+**Do not adopt this here.** Three concrete reasons, in order of severity:
+
+1. **It cannot write key-value tags.** The action's generated VDF contains only
+   `appid`, `contentfolder`, `changenote`, `publishedfileid`, `previewfile`,
+   `visibility`, `title`, `description` — `steamcmd`'s `workshop_build_item` has
+   no key-value-tag field at all. So the `version` key-value the game writes
+   (`RainWorldSteamManager.cs:264`) would keep whatever value the last in-game
+   upload set, and RainDB — which reads exactly those tags — would advertise the
+   old version forever while serving new content.
+2. **It overwrites the page.** `title` and `description` default to the repo name
+   and the head commit message. RandomBuff only runs it on a `Test**` branch with
+   `visibility: 3` (private) for that reason; it is a staging pipeline, not a
+   publish one.
+3. **Credentials.** Your Steam account password plus a 2FA shared secret in
+   GitHub secrets, for a 30 KB DLL. The shared secret is the whole second factor,
+   permanently, for the entire account.
+
+Everything *before* the upload — build, package, thumbnail validation, version
+agreement — is automated here. The upload itself is one button and takes ten
+seconds; leave it manual.
 
 ## RainDB
 

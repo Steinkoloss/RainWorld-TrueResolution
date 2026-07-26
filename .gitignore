@@ -12,6 +12,11 @@ artifacts/
 *.swp
 *~
 
+# tools/check-metadata.py is imported by nothing, but running it under
+# `python3 -m py_compile` (as a syntax check) leaves this behind.
+__pycache__/
+*.py[cod]
+
 # ---------------------------------------------------------- game-derived files
 # refs/ holds reference assemblies generated from the installed game by
 # tools/make-refs.sh. They contain no method bodies, but they are still a

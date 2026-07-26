@@ -36,6 +36,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned rather than relying on whatever SDK the runner image happens to
+      # ship: the "dependency graph still resolves" step below is only
+      # meaningful if the SDK doing the restore is the one contributors use.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
       - name: Validate modinfo.json, version agreement, thumbnail, mod layout
         run: python3 tools/check-metadata.py
 
