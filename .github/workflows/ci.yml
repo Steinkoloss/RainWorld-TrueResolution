@@ -129,6 +129,10 @@ jobs:
             Write-Error 'missing the actionable not-found message'; exit 1
           }
           Write-Host 'not-found path behaves'
+          # This step deliberately runs a script that exits 1, and GitHub's pwsh shell appends
+          # "exit $LASTEXITCODE" - which is still 1 from that child process. Without an explicit
+          # success the step fails even though every assertion above passed.
+          exit 0
 
       - name: Install into a fake game tree
         # Proves the copy layout and the enabledMods.txt handling without a game.
