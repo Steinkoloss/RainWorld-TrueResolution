@@ -32,8 +32,12 @@ namespace TrueResolution
             quality = config.Bind(
                 "Supersample", 2,
                 new ConfigurableInfo(
-                    "How much detail to render. 2 is a good default and 1 still keeps the rest of the "
-                    + "mod.\n"
+                    "How much detail to render.\n"
+                    + "0 = Native: render exactly at your screen's resolution. A 1:1 composite with no "
+                    + "resampling at all, the sharpest option for creatures, rain, HUD and text, and by "
+                    + "far the cheapest. Worth comparing against 2 and 4 - which looks better on room "
+                    + "artwork is a matter of taste.\n"
+                    + "2 is a good general default.\n"
                     + "With Smooth scaling OFF, higher values genuinely keep helping: the room artwork "
                     + "is magnified inside the engine with hard pixels instead of being stretched by "
                     + "your monitor, and a denser render places every pixel edge more precisely, so the "
@@ -41,16 +45,14 @@ namespace TrueResolution
                     + "framerate stops being comfortable.\n"
                     + "With Smooth scaling ON the returns fade much sooner, because filtering averages "
                     + "that precision away again.",
-                    new ConfigAcceptableRange<int>(1, 8)));
+                    new ConfigAcceptableRange<int>(0, 8)));
 
             smoothScaling = config.Bind(
                 "SmoothScaling", false,
                 new ConfigurableInfo(
                     "Off (default) keeps hard pixel edges, which suits Rain World's pixel art and is "
                     + "what most people prefer. Turn it on for a smoothed, filtered image instead - the "
-                    + "best filter for your resolution is then chosen automatically. With it off, keep "
-                    + "Render quality near 2: that lands the render close to your screen's resolution, "
-                    + "and much higher values discard most of the extra detail and shimmer in motion."));
+                    + "best filter for your resolution is then chosen automatically."));
 
             stretchToFill = config.Bind(
                 "StretchToFill", false,
@@ -153,10 +155,15 @@ namespace TrueResolution
             {
                 int v = quality.Value;
                 // Show the resolution the slider actually buys, so the number means something.
-                string res = s != null && s.pixelWidth > 0
-                    ? $"  ({s.pixelWidth * v}x{s.pixelHeight * v})"
-                    : "";
-                qualityValue.text = (v <= 1 ? "off" : v + "x") + res;
+                if (v == 0)
+                    qualityValue.text = $"native  ({Screen.width}x{Screen.height})";
+                else
+                {
+                    string res = s != null && s.pixelWidth > 0
+                        ? $"  ({s.pixelWidth * v}x{s.pixelHeight * v})"
+                        : "";
+                    qualityValue.text = (v == 1 ? "1x" : v + "x") + res;
+                }
             }
 
             if (status == null) return;

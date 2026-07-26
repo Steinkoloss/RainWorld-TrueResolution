@@ -43,7 +43,7 @@ namespace TrueResolution
     {
         public const string PluginGuid = "steinkoloss.trueresolution";
         public const string PluginName = "True Resolution";
-        public const string PluginVersion = "1.5.0";
+        public const string PluginVersion = "1.6.0";
 
         internal static ManualLogSource Log;
 
@@ -65,6 +65,9 @@ namespace TrueResolution
         private static int DesiredScale = 2;
         private static bool LegacyScreenOffset;
         private static DownsampleMode Downsampling = DownsampleMode.Point;
+
+        /// <summary>Supersample 0 means "size the render texture to the display exactly".</summary>
+        private static bool NativeRT;
 
         /// <summary>Setter for FScreen.renderTexture, which is an auto-property with a private set.</summary>
         private static PropertyInfo renderTextureProp;
@@ -113,7 +116,7 @@ namespace TrueResolution
         {
             if (self == null) return;
 
-            int newScale = Mathf.Clamp(supersample, 1, 8);
+            int newScale = Mathf.Clamp(supersample, 0, 8);
             bool rebuildNeeded = newScale != DesiredScale || ds != Downsampling;
             bool aspectChanged = am != Presentation.Mode;
 
@@ -123,6 +126,7 @@ namespace TrueResolution
             self.cfgAspectMode.Value = am;
 
             DesiredScale = newScale;
+            NativeRT = newScale == 0;
             Downsampling = ds;
 
             if (aspectChanged)
@@ -162,6 +166,11 @@ namespace TrueResolution
                     "Internal render scale. The game renders the same view at this multiple of its "
                     + "internal 768-pixel-tall buffer (1024-1366 wide depending on the aspect-ratio "
                     + "option), then it is scaled down to your screen.\n"
+                    + "0 = Native: size the render texture to your display exactly, for a 1:1 "
+                    + "composite with no resampling at all and a fraction of the cost. Sharpest "
+                    + "possible for the procedurally drawn art; the room artwork is then "
+                    + "magnified by a non-integer factor with hard pixels, which some people "
+                    + "prefer and some do not. Worth A/B-ing against 2 and 4.\n"
                     + "With Downsample=Point (the default) higher values keep paying off. Room artwork is "
                     + "a Point-filtered texture, so supersampling magnifies it INSIDE the engine with hard "
                     + "pixel edges, instead of letting the display stretch a 768-tall image by a "
@@ -178,7 +187,7 @@ namespace TrueResolution
                     + "framerate stops being comfortable.\n"
                     + "The scale is clamped automatically so the render texture stays within the GPU's "
                     + "maximum texture size. 1 disables supersampling.",
-                    new AcceptableValueRange<int>(1, 8)));
+                    new AcceptableValueRange<int>(0, 8)));
 
             cfgNativeBackbuffer = Config.Bind(
                 "Rendering", "NativeBackbuffer", true,
@@ -235,7 +244,8 @@ namespace TrueResolution
                 + "rescale. Only use this if Letterbox misbehaves.\n"
                 + "Stretch: vanilla behaviour. The picture is distorted on any non-16:9 display.");
 
-            DesiredScale = Mathf.Clamp(cfgSupersample.Value, 1, 8);
+            DesiredScale = Mathf.Clamp(cfgSupersample.Value, 0, 8);
+            NativeRT = DesiredScale == 0;
             LegacyScreenOffset = cfgLegacyScreenOffset.Value;
             Downsampling = cfgDownsample.Value;
             Presentation.Mode = cfgAspectMode.Value;
@@ -383,6 +393,11 @@ namespace TrueResolution
         /// </summary>
         private static int EffectiveScale(FScreen self)
         {
+            // Native mode does not use an integer multiple at all. Report 2 so FScreen.UpdateScreenOffset
+            // takes its non-1 branch (the sub-texel offset the devs wrote for a non-1:1 target); the real
+            // dimensions come from DesiredRTSize.
+            if (NativeRT) return 2;
+
             int want = Mathf.Clamp(DesiredScale, 1, 8);
             int pw = Mathf.Max(1, self.pixelWidth), ph = Mathf.Max(1, self.pixelHeight);
 

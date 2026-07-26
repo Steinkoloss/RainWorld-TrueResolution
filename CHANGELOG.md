@@ -10,6 +10,26 @@ do not.
 csproj reads `$(Version)` out of it, and `tools/check-metadata.py` asserts that
 `src/Plugin.cs` and this file match.
 
+## 1.6.0
+
+### Added
+- **Native render mode**, `Render quality = 0`. Sizes the render texture to your
+  display exactly instead of to an integer multiple of the internal buffer, giving
+  a **1:1 composite with no resampling at all** — the sharpest possible result for
+  everything drawn procedurally, at a fraction of the fill cost (3.7 MP at 1440p
+  versus 67 MP at 8x). Legal for the same reason supersampling is: the Futile
+  camera's `orthographicSize` comes from `pixelHeight` and never from the render
+  texture, so world framing does not move. `camera.aspect` is derived from the
+  target's dimensions, so the visible world width shifts by the difference between
+  the logical and display aspect ratios — 0.05%, under one world unit.
+- Which of Native, 2 or 4 looks best on the *room artwork* is genuinely a matter
+  of taste: Native magnifies it by a non-integer factor with hard pixels, while
+  supersampling quantises the edges more finely first. Worth an A/B.
+
+### Changed
+- The render-target logic is now one function that conforms size *and* mip state
+  together, rather than a mip-only path that could not resize.
+
 ## 1.5.0
 
 ### Changed
