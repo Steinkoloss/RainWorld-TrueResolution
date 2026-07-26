@@ -38,9 +38,18 @@ Set-StrictMode -Version Latest
 $ModId = 'trueresolution'
 $Here  = Split-Path -Parent $MyInvocation.MyCommand.Path
 
+function Join-PathLoose([string]$Base, [string]$Leaf) {
+    # Join-Path resolves the drive and throws "Cannot find drive" when probing a path on a
+    # drive letter that does not exist (a normal situation while guessing install locations).
+    # Test-Path handles missing drives fine, so build the string ourselves.
+    if ([string]::IsNullOrWhiteSpace($Base)) { return $Leaf }
+    return ($Base.TrimEnd('\', '/') + '\' + $Leaf.TrimStart('\', '/'))
+}
+
 function Test-RainWorldRoot([string] $Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-    Test-Path (Join-Path $Path 'RainWorld_Data\Managed\Assembly-CSharp.dll')
+    # String join, not Join-Path: this probes speculative paths. See Join-PathLoose above.
+    Test-Path (Join-PathLoose $Path 'RainWorld_Data\Managed\Assembly-CSharp.dll')
 }
 
 # ============================================================== find the game
@@ -77,7 +86,7 @@ function Find-RainWorld {
     $libraries = New-Object System.Collections.Generic.List[string]
     foreach ($root in $steamRoots) {
         foreach ($rel in 'steamapps\libraryfolders.vdf', 'config\libraryfolders.vdf') {
-            $vdf = Join-Path $root $rel
+            $vdf = Join-PathLoose $root $rel
             if (-not (Test-Path $vdf)) { continue }
             # Lines look like:   "path"    "D:\\SteamLibrary"
             foreach ($m in [regex]::Matches((Get-Content -Raw $vdf), '"path"\s*"([^"]*)"')) {
@@ -88,7 +97,7 @@ function Find-RainWorld {
     }
 
     foreach ($lib in $libraries) {
-        $cand = Join-Path $lib 'steamapps\common\Rain World'
+        $cand = Join-PathLoose $lib 'steamapps\common\Rain World'
         if (Test-RainWorldRoot $cand) { return $cand }
     }
 
