@@ -43,7 +43,7 @@ namespace TrueResolution
     {
         public const string PluginGuid = "steinkoloss.trueresolution";
         public const string PluginName = "True Resolution";
-        public const string PluginVersion = "1.3.1";
+        public const string PluginVersion = "1.4.0";
 
         internal static ManualLogSource Log;
 

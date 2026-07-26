@@ -269,7 +269,7 @@ swings a lot between a bare corridor and a rain-soaked, water-filled room.
 |---|---|
 | Modern mid-range and up (RX 6700 XT / RTX 3060 and better) | `2`, or `3–4` at 1080p if you want to experiment |
 | Budget/older (RX 6500 XT, RTX 3050, GTX 1650) at 1080p | `2` should be comfortable; drop to `1` if a heavy rain room dips |
-| 4 GB cards at 1440p or 4K | `1`. Each *named* grab pass allocates another full-size texture and there are 20 distinct ones; at high scales that adds up fast on a small framebuffer |
+| 4 GB cards at 1440p or 4K | `2` is still fine. The limit here is fill rate, not memory — even at `8` the render target is only ~360 MB |
 | Integrated graphics / Steam Deck | `1`. The native backbuffer still helps and costs nothing |
 
 If you are chasing a number, note that **frames per second will not tell you the

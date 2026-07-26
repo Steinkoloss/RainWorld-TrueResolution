@@ -5,62 +5,52 @@ using UnityEngine;
 namespace TrueResolution
 {
     /// <summary>
-    /// The mod's page in the in-game Remix config menu (main menu -> Remix -> True Resolution ->
-    /// the cog icon). Deliberately plain: one tab, one control per setting, a live status line so you can
-    /// see what you actually got, and nothing else.
+    /// The mod's page in the in-game Remix config menu (main menu -> Remix -> True Resolution -> cog).
     ///
-    /// The BepInEx config file stays the single source of truth for persistence. This page seeds its
-    /// controls from it every time the menu opens, and writes back to it on Apply, so editing the .cfg by
-    /// hand and using this page can never disagree. Remix's own saved copy of these values is ignored.
+    /// Two controls, because there are only two decisions a player actually has to make: how much to
+    /// render, and whether they want smooth or pixelated scaling. Everything else either has one correct
+    /// answer (present at the display's real resolution) or can be worked out from the numbers (which
+    /// filter to use), so it is decided automatically and left in the config file as an escape hatch.
+    ///
+    /// A third control appears only where it means something: on a non-16:9 display, where the player
+    /// genuinely has to choose between black bars and a stretched picture.
+    ///
+    /// The BepInEx config file stays the storage. This page seeds from it on open and writes back on
+    /// Apply, so hand-editing the .cfg and using this page cannot disagree.
     /// </summary>
     internal class TrueResolutionOptions : OptionInterface
     {
-        // Remix's combo boxes bind to Configurable<string>, not to an enum, so enum settings are stored
-        // by name and parsed back with Enum.TryParse.
-        private static readonly string[] DownsampleNames =
-            Enum.GetNames(typeof(DownsampleMode));
-        private static readonly string[] AspectNames =
-            Enum.GetNames(typeof(AspectMode));
+        internal readonly Configurable<int> quality;
+        internal readonly Configurable<bool> sharpPixels;
+        internal readonly Configurable<bool> stretchToFill;
 
-        internal readonly Configurable<int> supersample;
-        internal readonly Configurable<bool> nativeBackbuffer;
-        internal readonly Configurable<string> downsample;
-        internal readonly Configurable<string> aspect;
-
-        private OpLabel scaleValue;
+        private OpLabel qualityValue;
         private OpLabel status;
 
         internal TrueResolutionOptions()
         {
-            supersample = config.Bind(
+            quality = config.Bind(
                 "Supersample", 2,
                 new ConfigurableInfo(
-                    "How many times the game's internal buffer to render at. 2 is the sweet spot and is "
-                    + "already larger than most screens; past that you are only buying anti-aliasing. "
-                    + "Cost grows with the square of this. Set 1 on a weak GPU - you keep the native "
-                    + "backbuffer, which is the bigger improvement anyway.",
+                    "How much detail to render. 2 is the sweet spot and is already sharper than most "
+                    + "screens can show. Higher values only smooth edges further and cost a lot more; "
+                    + "1 turns supersampling off but keeps the rest of the mod, which is the bigger "
+                    + "improvement anyway. Room backgrounds never change - they are fixed artwork.",
                     new ConfigAcceptableRange<int>(1, 8)));
 
-            downsample = config.Bind(
-                "Downsample", DownsampleMode.Auto.ToString(),
+            sharpPixels = config.Bind(
+                "SharpPixels", false,
                 new ConfigurableInfo(
-                    "Filter used to bring the supersampled image down to your screen. Auto is right for "
-                    + "almost everyone: it uses a mipmap box pyramid when that helps and plain bilinear "
-                    + "when it would not. Point gives a hard pixelated look and aliases badly."));
+                    "Scale with hard nearest-neighbour pixels instead of smoothing. Off is recommended "
+                    + "and picks the best filter for your resolution by itself. On gives a crunchy, "
+                    + "pixelated look and will shimmer when the camera moves."));
 
-            aspect = config.Bind(
-                "AspectMode", AspectMode.Letterbox.ToString(),
+            stretchToFill = config.Bind(
+                "StretchToFill", false,
                 new ConfigurableInfo(
-                    "How the game's ~16:9 picture is fitted to your display. Letterbox keeps it "
-                    + "undistorted with black bars and is a no-op on a 16:9 screen. Stretch is vanilla "
-                    + "behaviour and distorts on anything else."));
-
-            nativeBackbuffer = config.Bind(
-                "NativeBackbuffer", true,
-                new ConfigurableInfo(
-                    "Present at your display's real resolution in fullscreen instead of letting the game "
-                    + "shrink the window to its internal buffer size. Costs almost nothing and is the "
-                    + "single biggest visual improvement. There is no good reason to turn this off."));
+                    "Only matters if your screen is not 16:9. Off keeps the picture the correct shape "
+                    + "with black bars at the sides. On stretches it to fill the screen, which distorts "
+                    + "it - Rain World cannot actually show more of the room."));
 
             OnConfigChanged += ApplyToPlugin;
         }
@@ -70,8 +60,6 @@ namespace TrueResolution
         public override void Initialize()
         {
             base.Initialize();
-
-            // Show what is actually in force, not whatever Remix last persisted.
             SeedFromPlugin();
 
             OpTab tab = new OpTab(this, "Options");
@@ -81,62 +69,62 @@ namespace TrueResolution
             const float ctrlX = 300f;
             float y = 540f;
 
-            tab.AddItems(
-                new OpLabel(new Vector2(labelX, y), new Vector2(520f, 34f), "True Resolution",
-                            FLabelAlignment.Left, bigText: true));
+            tab.AddItems(new OpLabel(new Vector2(labelX, y), new Vector2(520f, 34f), "True Resolution",
+                                     FLabelAlignment.Left, bigText: true));
 
             y -= 30f;
-            tab.AddItems(
-                new OpLabel(new Vector2(labelX, y), new Vector2(520f, 20f),
-                            "Changes apply immediately. Hover a setting for details.",
-                            FLabelAlignment.Left));
+            tab.AddItems(new OpLabel(new Vector2(labelX, y), new Vector2(520f, 20f),
+                                     "Changes apply immediately. Hover a setting for details.",
+                                     FLabelAlignment.Left));
 
-            // ---- Supersample
-            y -= 56f;
-            OpSlider slider = new OpSlider(supersample, new Vector2(ctrlX, y), 160)
+            // ---- Render quality
+            y -= 60f;
+            OpSlider slider = new OpSlider(quality, new Vector2(ctrlX, y), 160)
             {
-                description = supersample.info.description
+                description = quality.info.description
             };
-            scaleValue = new OpLabel(new Vector2(ctrlX + 172f, y), new Vector2(60f, 24f), "",
-                                     FLabelAlignment.Left);
-            tab.AddItems(Row(labelX, y, "Supersample"), slider, scaleValue);
+            qualityValue = new OpLabel(new Vector2(ctrlX + 172f, y), new Vector2(180f, 24f), "",
+                                       FLabelAlignment.Left);
+            tab.AddItems(Row(labelX, y, "Render quality"), slider, qualityValue);
 
-            // ---- Downsample filter
-            y -= 46f;
-            OpComboBox dsBox = new OpComboBox(downsample, new Vector2(ctrlX, y), 160f, DownsampleNames)
-            {
-                description = downsample.info.description
-            };
-            tab.AddItems(Row(labelX, y, "Downsample filter"), dsBox);
+            // ---- Sharp pixels
+            y -= 50f;
+            tab.AddItems(Row(labelX, y, "Sharp pixels"),
+                         new OpCheckBox(sharpPixels, new Vector2(ctrlX, y))
+                         {
+                             description = sharpPixels.info.description
+                         });
 
-            // ---- Aspect fit
-            y -= 46f;
-            OpComboBox aspectBox = new OpComboBox(aspect, new Vector2(ctrlX, y), 160f, AspectNames)
+            // Only offer the aspect choice where it changes anything. On a 16:9 screen both settings look
+            // identical, and a control that visibly does nothing is worse than no control.
+            if (IsNon16By9())
             {
-                description = aspect.info.description
-            };
-            tab.AddItems(Row(labelX, y, "Aspect fit"), aspectBox);
-
-            // ---- Native backbuffer
-            y -= 46f;
-            OpCheckBox check = new OpCheckBox(nativeBackbuffer, new Vector2(ctrlX, y))
-            {
-                description = nativeBackbuffer.info.description
-            };
-            tab.AddItems(Row(labelX, y, "Native backbuffer"), check);
+                y -= 50f;
+                tab.AddItems(Row(labelX, y, "Stretch to fill screen"),
+                             new OpCheckBox(stretchToFill, new Vector2(ctrlX, y))
+                             {
+                                 description = stretchToFill.info.description
+                             });
+            }
 
             // ---- live status
-            y -= 64f;
-            status = new OpLabel(new Vector2(labelX, y), new Vector2(520f, 20f), "",
-                                 FLabelAlignment.Left);
+            y -= 70f;
+            status = new OpLabel(new Vector2(labelX, y), new Vector2(520f, 20f), "", FLabelAlignment.Left);
             tab.AddItems(status);
 
-            y -= 46f;
-            tab.AddItems(new OpLabelLong(new Vector2(labelX, y - 40f), new Vector2(520f, 60f),
-                "Rarely-needed options (a manual TargetWidth/TargetHeight override, and a half-pixel "
-                + "diagnostic switch) live in BepInEx/config/steinkoloss.trueresolution.cfg."));
+            y -= 60f;
+            tab.AddItems(new OpLabelLong(new Vector2(labelX, y), new Vector2(520f, 60f),
+                "Everything else is automatic. Troubleshooting overrides live in "
+                + "BepInEx/config/steinkoloss.trueresolution.cfg."));
 
-            RefreshStatus();
+            Refresh();
+        }
+
+        private static bool IsNon16By9()
+        {
+            if (Screen.width <= 0 || Screen.height <= 0) return false;
+            float aspect = (float)Screen.width / Screen.height;
+            return Mathf.Abs(aspect - 16f / 9f) > 0.02f;
         }
 
         private static OpLabel Row(float x, float y, string text)
@@ -147,42 +135,44 @@ namespace TrueResolution
         public override void Update()
         {
             base.Update();
-            RefreshStatus();
+            Refresh();
         }
 
-        private void RefreshStatus()
+        private void Refresh()
         {
-            if (scaleValue != null)
+            FScreen s = Futile.screen;
+
+            if (qualityValue != null)
             {
-                int v = supersample.Value;
-                scaleValue.text = v <= 1 ? "off" : v + "x";
+                int v = quality.Value;
+                // Show the resolution the slider actually buys, so the number means something.
+                string res = s != null && s.pixelWidth > 0
+                    ? $"  ({s.pixelWidth * v}x{s.pixelHeight * v})"
+                    : "";
+                qualityValue.text = (v <= 1 ? "off" : v + "x") + res;
             }
 
             if (status == null) return;
-
-            FScreen s = Futile.screen;
             if (s == null || s.renderTexture == null)
             {
                 status.text = "not rendering yet";
                 return;
             }
 
-            status.text = $"logical {s.pixelWidth}x{s.pixelHeight}  ->  render "
-                          + $"{s.renderTexture.width}x{s.renderTexture.height} ({s.renderTexture.filterMode})"
-                          + $"  ->  screen {Screen.width}x{Screen.height}";
+            status.text = $"rendering {s.renderTexture.width}x{s.renderTexture.height}"
+                          + $"  ->  your screen {Screen.width}x{Screen.height}"
+                          + $"  ({s.renderTexture.filterMode})";
         }
 
         // ---------------------------------------------------------------- sync
 
-        /// <summary>Pull the values currently in force so the controls never show something stale.</summary>
         private void SeedFromPlugin()
         {
             try
             {
-                supersample.Value = Plugin.CurrentSupersample;
-                nativeBackbuffer.Value = Plugin.CurrentNativeBackbuffer;
-                downsample.Value = Plugin.CurrentDownsample.ToString();
-                aspect.Value = Plugin.CurrentAspect.ToString();
+                quality.Value = Plugin.CurrentSupersample;
+                sharpPixels.Value = Plugin.CurrentDownsample == DownsampleMode.Point;
+                stretchToFill.Value = Plugin.CurrentAspect == AspectMode.Stretch;
             }
             catch (Exception e)
             {
@@ -190,19 +180,22 @@ namespace TrueResolution
             }
         }
 
-        /// <summary>Fired by Remix when the user presses Apply.</summary>
         private void ApplyToPlugin()
         {
             try
             {
-                DownsampleMode ds;
-                if (!Enum.TryParse(downsample.Value, out ds)) ds = DownsampleMode.Auto;
+                // Unchecking these must not stamp on a deliberate MipmapBox/Bilinear or AspectBackbuffer
+                // choice made in the config file, so only override when the checkbox actually disagrees.
+                DownsampleMode ds = Plugin.CurrentDownsample;
+                if (sharpPixels.Value) ds = DownsampleMode.Point;
+                else if (ds == DownsampleMode.Point) ds = DownsampleMode.Auto;
 
-                AspectMode am;
-                if (!Enum.TryParse(aspect.Value, out am)) am = AspectMode.Letterbox;
+                AspectMode am = Plugin.CurrentAspect;
+                if (stretchToFill.Value) am = AspectMode.Stretch;
+                else if (am == AspectMode.Stretch) am = AspectMode.Letterbox;
 
-                Plugin.ApplyFromOptions(supersample.Value, nativeBackbuffer.Value, ds, am);
-                RefreshStatus();
+                Plugin.ApplyFromOptions(quality.Value, Plugin.CurrentNativeBackbuffer, ds, am);
+                Refresh();
             }
             catch (Exception e)
             {

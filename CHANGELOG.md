@@ -10,6 +10,29 @@ do not.
 csproj reads `$(Version)` out of it, and `tools/check-metadata.py` asserts that
 `src/Plugin.cs` and this file match.
 
+## 1.4.0
+
+### Changed
+- **The settings page is now two controls.** There are only two decisions a
+  player actually has to make — how much to render, and smooth or pixelated —
+  so it is a **Render quality** slider and a **Sharp pixels** tick box. The
+  slider shows the resolution it buys, so the number means something.
+- Everything else was either automatic already or has one correct answer, and is
+  decided for you: which downsample filter to use is worked out from the ratio,
+  and presenting at the display's real resolution is always right. Both remain in
+  the config file as troubleshooting overrides.
+- **Stretch to fill screen** appears only on a non-16:9 display, where it is a
+  real choice between black bars and a distorted picture. On 16:9 both settings
+  look identical, and a control that visibly does nothing is worse than no control.
+- Unticking a box no longer stamps on a deliberate `MipmapBox`, `Bilinear` or
+  `AspectBackbuffer` choice made in the config file; it only overrides when the
+  tick box actually disagrees.
+
+### Fixed
+- The performance guidance overstated memory pressure. Even at `Supersample = 8`
+  the render target is ~360 MB, which is not a problem on a 4 GB card. The real
+  constraint is fill rate.
+
 ## 1.3.1
 
 ### Fixed
